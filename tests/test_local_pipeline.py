@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pipeline as pipeline_module  # noqa: E402
 from pipeline import start_local_pipeline  # noqa: E402
 
 
@@ -26,3 +27,29 @@ def test_missing_keys_named_in_error(monkeypatch, set_var, missing_var) -> None:
     assert missing_var in result["error"]
     if set_var:
         assert set_var not in result["error"]
+
+
+def test_disconnect_cancels_pipeline_and_waits_for_cleanup(monkeypatch) -> None:
+    async def scenario() -> None:
+        cleanup_finished = asyncio.Event()
+
+        async def running_pipeline() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleanup_finished.set()
+
+        run_task = asyncio.create_task(running_pipeline())
+        monkeypatch.setattr(pipeline_module, "_RUN_TASK", run_task)
+        monkeypatch.setattr(
+            pipeline_module, "_RUN_INFO", {"connection_id": "test-connection"}
+        )
+        await asyncio.sleep(0)
+
+        await pipeline_module._stop_pipeline_on_disconnect("test-connection")
+
+        assert run_task.done()
+        assert cleanup_finished.is_set()
+
+    asyncio.run(scenario())

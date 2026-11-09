@@ -60,6 +60,23 @@ async def _run_pipeline(runner, task, session, connection_id: str) -> None:
         ACTIVE_CONNECTIONS.pop(connection_id, None)
 
 
+async def _stop_pipeline_on_disconnect(connection_id: str) -> None:
+    """Cancel the pipeline and wait for cleanup when its peer disconnects."""
+    run_task = _RUN_TASK
+    if (
+        run_task is None
+        or run_task.done()
+        or _RUN_INFO.get("connection_id") != connection_id
+    ):
+        return
+
+    run_task.cancel()
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        pass
+
+
 async def start_local_pipeline() -> dict:
     """Start a Pipecat pipeline with smallwebrtc local audio transport.
 
@@ -167,6 +184,13 @@ async def start_local_pipeline() -> dict:
     connection_id = str(uuid.uuid4())
     connection = SmallWebRTCConnection()
     ACTIVE_CONNECTIONS[connection_id] = connection
+
+    async def on_disconnect(_connection) -> None:
+        await _stop_pipeline_on_disconnect(connection_id)
+
+    connection.event_handler("disconnected")(on_disconnect)
+    connection.event_handler("failed")(on_disconnect)
+
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
