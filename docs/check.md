@@ -16,3 +16,7 @@ After writing code for a new piece, run these checks again before moving on:
 - [ ] `hermes plugins doctor <plugin-dir>` → OK, registration counts match what was declared
 - [ ] Smoke test asserts the new tool or hook name is present
 - [ ] Read the real output from each command — do not guess whether it passed
+
+## Tests
+
+- [ ] `pytest tests` (run from the repo root; `tests/pytest.ini` keeps pytest from importing the root plugin `__init__.py`) -> all pass

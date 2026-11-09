@@ -20,10 +20,12 @@
 - Added smallwebrtc and openai to python_dependencies with upper bounds
 - Registered voice.start_local_pipeline in __init__.py and declared it in plugin.yaml
 - Updated smoke test and practical test for the new provider stack
-- Installed pipecat-ai 1.15.0 and verified all API signatures
+- Verified API signatures against pipecat v1.7.0 (the pinned range): async add_ice_candidate, extras elevenlabs/openai/silero/webrtc, Python >=3.11
 - Wrote frontend/index.html — browser WebRTC voice UI (connect, mute, volume, audio meters, transcript)
 - Wrote frontend/signaling-server.py — HTTP signaling server bridging browser SDP offers to the running Pipecat pipeline
 - Exposed ACTIVE_CONNECTIONS registry and _ACTIVE_LOOP in pipeline.py for signaling
+
+- Audit fixes: signaling server bound to 127.0.0.1 with Origin check and same-origin UI; keys read from env only; stub tools return ok:False; single running pipeline with cleanup; ICE candidates parsed and awaited on the pipeline loop; deps trimmed and extras added; tests rewritten for pytest
 
 ## In progress
 - Nothing yet

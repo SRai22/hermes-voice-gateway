@@ -28,7 +28,10 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
+# The one list of keys every voice tool needs (hooks.py imports it too).
 REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
+
+SIGNALING_PORT = 8765
 
 # Registry of active WebRTC connections, keyed by connection id.
 # A signaling server can look up a connection here to exchange SDP with a
@@ -40,27 +43,42 @@ ACTIVE_CONNECTIONS: dict[str, object] = {}
 # HTTP handler thread.
 _ACTIVE_LOOP: asyncio.AbstractEventLoop | None = None
 
+# The running pipeline task and its connection id. Held here so the task is not
+# garbage-collected and so a second call can reuse the running pipeline.
+_RUN_TASK: asyncio.Task | None = None
+_RUN_INFO: dict = {}
 
-def _missing_env() -> list[str]:
-    return [v for v in REQUIRED_ENV if not os.environ.get(v)]
+
+async def _run_pipeline(runner, task, session, connection_id: str) -> None:
+    """Run the pipeline, then release its HTTP session and connection entry."""
+    try:
+        await runner.run(task)
+    except Exception:
+        logger.exception("pipeline %s crashed", connection_id)
+    finally:
+        await session.close()
+        ACTIVE_CONNECTIONS.pop(connection_id, None)
 
 
-async def start_local_pipeline(
-    elevenlabs_api_key: str = "", openai_api_key: str = ""
-) -> dict:
+async def start_local_pipeline() -> dict:
     """Start a Pipecat pipeline with smallwebrtc local audio transport.
 
+    Keys come from the environment only (never from tool arguments).
     Returns ``{"ok": True, ...}`` with connection info when the pipeline
     starts, or ``{"ok": False, "error": ...}`` when dependencies or
-    credentials are missing.
+    credentials are missing. If a pipeline is already running, returns its
+    info instead of starting a second one.
 
     The pipeline runs as a background asyncio task after this call returns,
     waiting for a WebRTC client to connect to the smallwebrtc transport.
     """
-    global _ACTIVE_LOOP  # CRITICAL: without this, module global stays None
+    global _ACTIVE_LOOP, _RUN_TASK, _RUN_INFO  # without global, these stay None
 
-    elevenlabs_key = elevenlabs_api_key or os.environ.get("ELEVENLABS_API_KEY", "")
-    openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
+    if _RUN_TASK is not None and not _RUN_TASK.done():
+        return {**_RUN_INFO, "already_running": True}
+
+    elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
 
     # Model names come from env with sensible defaults
     stt_model = os.environ.get("ELEVENLABS_STT_MODEL", "scribe_v2")
@@ -68,19 +86,11 @@ async def start_local_pipeline(
     llm_model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
     voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "")
 
-    missing = []
-    if not elevenlabs_key:
-        missing.append("ELEVENLABS_API_KEY")
-    if not openai_key:
-        missing.append("OPENAI_API_KEY")
+    missing = [v for v in REQUIRED_ENV if not os.environ.get(v)]
     if missing:
         return {
             "ok": False,
-            "error": (
-                "Missing required keys: "
-                + ", ".join(missing)
-                + ". Set them in your environment or pass them to the tool."
-            ),
+            "error": "Missing required keys: " + ", ".join(missing) + ". Set them in your environment.",
         }
 
     try:
@@ -124,8 +134,8 @@ async def start_local_pipeline(
             "error": (
                 "Pipecat or smallwebrtc not installed: "
                 + str(exc)
-                + ". Install pipecat-ai>=1.7.0,<1.8.0 to use the local "
-                "pipeline."
+                + ". Install pipecat-ai[elevenlabs,openai,silero,webrtc]"
+                ">=1.7.0,<1.8.0 to use the local pipeline."
             ),
         }
 
@@ -219,13 +229,8 @@ async def start_local_pipeline(
     # Start the runner as a background task so this function returns
     # immediately while the pipeline keeps running and waiting for a
     # WebRTC client to connect.
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    _ACTIVE_LOOP = loop
-    loop.create_task(runner.run(task))
+    _ACTIVE_LOOP = asyncio.get_running_loop()
+    _RUN_TASK = _ACTIVE_LOOP.create_task(_run_pipeline(runner, task, session, connection_id))
 
     logger.info(
         "start_local_pipeline: pipeline started (llm=openai:%s, stt=elevenlabs:%s, tts=elevenlabs:%s, transport=smallwebrtc, connection_id=%s)",
@@ -235,17 +240,18 @@ async def start_local_pipeline(
         connection_id,
     )
 
-    return {
+    _RUN_INFO = {
         "ok": True,
         "transport": "smallwebrtc",
         "stt": "elevenlabs:" + stt_model,
         "llm": "openai:" + llm_model,
         "tts": "elevenlabs:" + tts_model,
         "connection_id": connection_id,
-        "signaling_url": "http://localhost:8765",
+        "signaling_url": f"http://127.0.0.1:{SIGNALING_PORT}",
         "note": (
-            "Pipeline started and running in the background. A WebRTC client "
-            "can connect by first GET /connections to discover the connection "
-            "id, then POST /offer with that connectionId at the signaling URL."
+            "Pipeline started and running in the background. Run "
+            "scripts/start_local_pipeline.py (same process) and open the "
+            "signaling URL in a browser to connect."
         ),
     }
+    return _RUN_INFO

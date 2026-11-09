@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from .hooks import on_pre_tool_call
-from .pipeline import start_local_pipeline as _pipeline_start  # noqa: F401
+from .pipeline import start_local_pipeline
 from .schemas import (
     CHECK_STATUS_SCHEMA,
     LOCAL_PIPELINE_SCHEMA,
@@ -19,7 +19,6 @@ from .tools import (
     check_call_status,
     propose_callback,
     route_inbound,
-    start_local_pipeline,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ def register(ctx):
         handler=route_inbound,
         description=(
             "Answer an inbound call on the business line and start the "
-            "Pipecat voice pipeline (Twilio media stream -> Deepgram STT/TTS)."
+            "Pipecat voice pipeline (Twilio media stream; not implemented yet)."
         ),
     )
     ctx.register_tool(
