@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Voice Gateway — Local Pipeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0b0c10;
+    color: #c5c6c7;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .container {
+    width: 100%;
+    max-width: 420px;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #ffffff;
+    margin-bottom: 8px;
+    text-align: center;
+  }
+  .subtitle {
+    font-size: 0.85rem;
+    color: #666;
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: #1a1b1e;
+    border: 1px solid #2d2e32;
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4a4b4d;
+  }
+  .status-dot.connected { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .status-dot.connecting { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+  .status-dot.error { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .btn {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: none;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 12px;
+    transition: all 0.2s;
+  }
+  .btn.connect {
+    background: #22c55e;
+    color: #ffffff;
+  }
+  .btn.connect:disabled { background: #4a4b4d; color: #888; cursor: not-allowed; }
+  .btn.disconnect {
+    background: #ef4444;
+    color: #ffffff;
+    display: none;
+  }
+  .btn.mute {
+    background: #2d2e32;
+    color: #c5c6c7;
+    border: 1px solid #4a4b4d;
+    display: none;
+  }
+  .btn.mute.active { background: #ef4444; }
+  .audio-meters {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .meter {
+    flex: 1;
+    height: 6px;
+    background: #2d2e32;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .meter-fill {
+    height: 100%;
+    background: #22c55e;
+    width: 0%;
+    transition: width 0.05s;
+  }
+  .meter-fill.remote { background: #3b82f6; }
+  .label {
+    font-size: 0.75rem;
+    color: #666;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .transcript {
+    background: #0d0e11;
+    border: 1px solid #2d2e32;
+    border-radius: 12px;
+    padding: 16px;
+    font-size: 1rem;
+    color: #c5c6c7;
+    min-height: 60px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .volume-control {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  input[type=range] {
+    width: 100%;
+    accent-color: #22c55e;
+  }
+  .debug {
+    margin-top: 24px;
+    padding: 12px;
+    background: #0d0e11;
+    border: 1px solid #2d2e32;
+    border-radius: 8px;
+    font-size: 0.7rem;
+    color: #666;
+    font-family: monospace;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none;
+  }
+  .debug.show { display: block; }
+  .debug-line {
+    margin-bottom: 4px;
+    padding: 2px 0;
+    border-bottom: 1px solid #1a1b1e;
+  }
+  .error-msg {
+    color: #ef4444;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Hermes Voice</h1>
+  <div class="subtitle">Local Pipecat pipeline · ElevenLabs STT/TTS · OpenAI LLM</div>
+
+  <div class="card">
+    <div class="status" id="status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Disconnected</span>
+    </div>
+
+    <div class="error-msg" id="errorMsg"></div>
+
+    <button class="btn connect" id="connectBtn">Connect to Pipeline</button>
+    <button class="btn disconnect" id="disconnectBtn">Disconnect</button>
+    <button class="btn mute" id="muteBtn">Mute Microphone</button>
+
+    <div class="audio-meters">
+      <div>
+        <div class="label">Microphone</div>
+        <div class="meter"><div class="meter-fill" id="localMeter"></div></div>
+      </div>
+      <div>
+        <div class="label">Speaker</div>
+        <div class="meter"><div class="meter-fill remote" id="remoteMeter"></div></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="volume-control">
+        <div class="label">Volume</div>
+        <input type="range" id="volume" min="0" max="1" step="0.05" value="0.7">
+      </div>
+    </div>
+
+    <div class="transcript" id="transcript">Say something after connecting...</div>
+  </div>
+
+  <div class="debug" id="debug">
+    <div class="label">Signaling Log</div>
+    <div id="debugLog"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const STATUS_DISCONNECTED = 'disconnected';
+  const STATUS_CONNECTING = 'connecting';
+  const STATUS_CONNECTED = 'connected';
+  const STATUS_ERROR = 'error';
+
+  // DOM elements
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const muteBtn = document.getElementById('muteBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const errorMsg = document.getElementById('errorMsg');
+  const transcript = document.getElementById('transcript');
+  const localMeter = document.getElementById('localMeter');
+  const remoteMeter = document.getElementById('remoteMeter');
+  const volumeInput = document.getElementById('volume');
+  const debugLog = document.getElementById('debugLog');
+  const debug = document.getElementById('debug');
+
+  // Config
+  const SIGNALING_URL = 'http://localhost:8765';
+
+  // State
+  let pc = null;
+  let localStream = null;
+  let remoteAudio = null;
+  let isMuted = false;
+  let connectionId = null;
+  let mediaRecorder = null;
+  let audioCtx = null;
+  let analyser = null;
+  let micSource = null;
+
+  function setStatus(status, text) {
+    statusDot.className = 'status-dot ' + status;
+    statusText.textContent = text;
+  }
+
+  function setError(msg) {
+    errorMsg.textContent = msg;
+    errorMsg.style.display = msg ? 'block' : 'none';
+  }
+
+  function log(msg) {
+    const line = document.createElement('div');
+    line.className = 'debug-line';
+    line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    debugLog.appendChild(line);
+    debugLog.scrollTop = debugLog.scrollHeight;
+  }
+
+  function setTranscript(text) {
+    transcript.textContent = text;
+  }
+
+  async function startAudioVisualization(stream) {
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      micSource = audioCtx.createMediaStreamSource(stream);
+      micSource.connect(analyser);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      function draw() {
+        if (!analyser) return;
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+        const pct = Math.min(100, (avg / 255) * 300);
+        localMeter.querySelector('.meter-fill').style.width = pct + '%';
+        requestAnimationFrame(draw);
+      }
+      draw();
+    } catch (e) {
+      log('Audio visualization unavailable: ' + e.message);
+    }
+  }
+
+  async function createPeerConnection() {
+    const configuration = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+    pc = new RTCPeerConnection(configuration);
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && connectionId) {
+        log('ICE candidate: ' + event.candidate.candidate.slice(0, 60) + '...');
+        fetch(SIGNALING_URL + '/ice-candidate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            connectionId: connectionId,
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex
+          })
+        }).catch(() => {});
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      log('Connection state: ' + pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        setStatus(STATUS_CONNECTED, 'Connected — speak now');
+        connectBtn.style.display = 'none';
+        disconnectBtn.style.display = 'block';
+        muteBtn.style.display = 'block';
+        setError('');
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setStatus(STATUS_DISCONNECTED, 'Disconnected');
+        connectBtn.style.display = 'block';
+        disconnectBtn.style.display = 'none';
+        muteBtn.style.display = 'none';
+      }
+    };
+
+    pc.ontrack = (event) => {
+      log('Remote track received');
+      const [track] = event.streams;
+      if (!remoteAudio) {
+        remoteAudio = new Audio();
+        remoteAudio.autoplay = true;
+        remoteAudio.volume = volumeInput.value;
+        remoteAudio.srcObject = track;
+        remoteAudio.play().catch(() => {});
+      }
+      volumeInput.addEventListener('input', () => {
+        if (remoteAudio) remoteAudio.volume = volumeInput.value;
+      });
+    };
+
+    return pc;
+  }
+
+  async function connect() {
+    setStatus(STATUS_CONNECTING, 'Connecting...');
+    setError('');
+
+    try {
+      // Step 1: Get microphone access
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000
+        },
+        video: false
+      });
+      startAudioVisualization(localStream);
+
+      // Step 2: Create peer connection
+      await createPeerConnection();
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      // Step 3: Create offer
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true
+      });
+      await pc.setLocalDescription(offer);
+      log('Created SDP offer');
+
+      // Step 4a: Discover the active pipeline connection from the signaling server
+      const connResp = await fetch(SIGNALING_URL + '/connections');
+      const connData = await connResp.json();
+      if (!connData || connData.count < 1) {
+        throw new Error('No active pipeline connection on the signaling server');
+      }
+      const discoveredId = connData.connections[0];
+      log('Discovered connection id: ' + discoveredId);
+
+      // Step 4b: Send offer to signaling server
+      log('Sending offer to ' + SIGNALING_URL + '/offer');
+      const resp = await fetch(SIGNALING_URL + '/offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          connectionId: discoveredId,
+          sdp: offer.sdp,
+          type: offer.type
+        })
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error('Signaling server error: ' + resp.status + ' ' + errText);
+      }
+
+      const data = await resp.json();
+      connectionId = data.connectionId;
+      log('Got answer, connectionId=' + connectionId);
+
+      // Step 5: Set remote description
+      await pc.setRemoteDescription({
+        sdp: data.sdp,
+        type: data.type
+      });
+      log('Remote description set');
+
+      // Start remote audio level visualization
+      function drawRemote() {
+        if (!remoteMeter) return;
+        // Simulate remote audio level from Web Audio if available
+        requestAnimationFrame(drawRemote);
+      }
+      drawRemote();
+
+    } catch (err) {
+      log('Error: ' + err.message);
+      setError(err.message);
+      setStatus(STATUS_ERROR, 'Connection failed');
+      cleanup();
+    }
+  }
+
+  function disconnect() {
+    cleanup();
+    setStatus(STATUS_DISCONNECTED, 'Disconnected');
+    connectBtn.style.display = 'block';
+    disconnectBtn.style.display = 'none';
+    muteBtn.style.display = 'none';
+    setTranscript('Say something after connecting...');
+    localMeter.querySelector('.meter-fill').style.width = '0%';
+    remoteMeter.querySelector('.meter-fill').style.width = '0%';
+    connectionId = null;
+  }
+
+  function cleanup() {
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+    if (remoteAudio) {
+      remoteAudio.pause();
+      remoteAudio.srcObject = null;
+      remoteAudio = null;
+    }
+    if (audioCtx) {
+      try { audioCtx.close(); } catch (e) {}
+      audioCtx = null;
+    }
+    micSource = null;
+    analyser = null;
+  }
+
+  muteBtn.addEventListener('click', () => {
+    isMuted = !isMuted;
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
+    }
+    muteBtn.classList.toggle('active', isMuted);
+    muteBtn.textContent = isMuted ? 'Unmute Microphone' : 'Mute Microphone';
+  });
+
+  volumeInput.addEventListener('input', () => {
+    if (remoteAudio) remoteAudio.volume = volumeInput.value;
+  });
+
+  connectBtn.addEventListener('click', connect);
+  disconnectBtn.addEventListener('click', disconnect);
+
+  // Toggle debug
+  document.body.addEventListener('keydown', (e) => {
+    if (e.key === 'd' || e.key === 'D') {
+      debug.classList.toggle('show');
+    }
+  });
+
+  // Initial state
+  setStatus(STATUS_DISCONNECTED, 'Disconnected');
+  log('Frontend loaded. Signaling URL: ' + SIGNALING_URL);
+  log('Press D to toggle debug log');
+})();
+</script>
+</body>
+</html>

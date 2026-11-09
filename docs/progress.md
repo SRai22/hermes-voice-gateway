@@ -12,13 +12,18 @@
 - Wrote a practical test for the local pipeline handler
 - Ran hermes plugins validate → passed
 - Ran hermes plugins doctor → passed (4 tools, 1 hook registered)
-- Wrote pipeline.py with full Pipecat 1.15.0 wiring (SmallWebRTCTransport, ElevenLabs STT/TTS, OpenAI LLM, UserTurnProcessor with VAD, RTVI, PipelineRunner) — no echo fallback, real OpenAI LLM path
+- Wrote pipeline.py with full Pipecat 1.7.0 wiring (SmallWebRTCTransport, ElevenLabs STT/TTS with Settings pattern, OpenAI LLM with OpenAILLMSettings, LLMContextAggregatorPair with SileroVADAnalyzer, RTVI, PipelineRunner) — models from env (ELEVENLABS_STT_MODEL=scribe_v2, ELEVENLABS_TTS_MODEL=eleven_flash_v2_5, OPENAI_MODEL=gpt-5.6-luna)
+- Fixed critical bugs: global _ACTIVE_LOOP, signaling server imports pipeline module (not from pipeline import), frontend discovers connection id via GET /connections
+- Added scripts/start_local_pipeline.py — combined pipeline + signaling runner in ONE process
 - Added voice.start_local_pipeline async tool for local audio development before Twilio
 - Switched STT/TTS from Deepgram to ElevenLabs, LLM to OpenAI (both required)
 - Added smallwebrtc and openai to python_dependencies with upper bounds
 - Registered voice.start_local_pipeline in __init__.py and declared it in plugin.yaml
 - Updated smoke test and practical test for the new provider stack
 - Installed pipecat-ai 1.15.0 and verified all API signatures
+- Wrote frontend/index.html — browser WebRTC voice UI (connect, mute, volume, audio meters, transcript)
+- Wrote frontend/signaling-server.py — HTTP signaling server bridging browser SDP offers to the running Pipecat pipeline
+- Exposed ACTIVE_CONNECTIONS registry and _ACTIVE_LOOP in pipeline.py for signaling
 
 ## In progress
 - Nothing yet

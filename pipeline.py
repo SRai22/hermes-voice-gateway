@@ -5,21 +5,40 @@ Sets up a complete Pipecat voice pipeline running locally over WebRTC
 Twilio phone lines.
 
 Pipeline flow:
-  WebRTC audio in → VAD turn detection → ElevenLabs STT → OpenAI LLM → ElevenLabs TTS → WebRTC audio out
+  WebRTC audio in → ElevenLabs STT → LLM context aggregator (user) → OpenAI LLM
+  → LLM context aggregator (assistant) → ElevenLabs TTS → WebRTC audio out
 
 All Pipecat / smallwebrtc / ElevenLabs / OpenAI imports live inside the
 ``start_local_pipeline`` function, never at module load. The plugin registers
 and loads cleanly even when none of those packages are installed.
+
+Active connections are tracked in ``ACTIVE_CONNECTIONS`` so a signaling
+server (see ``frontend/signaling-server.py``) can exchange SDP with a
+running pipeline and let a browser-based voice UI connect end to end.
+
+The pipeline and signaling server must run in the SAME process because
+``ACTIVE_CONNECTIONS`` and ``_ACTIVE_LOOP`` are in-process globals.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
 REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
+
+# Registry of active WebRTC connections, keyed by connection id.
+# A signaling server can look up a connection here to exchange SDP with a
+# running pipeline.
+ACTIVE_CONNECTIONS: dict[str, object] = {}
+
+# The event loop that the pipeline runs on. The signaling server uses this
+# to schedule coroutines (connection.initialize, get_answer) from its own
+# HTTP handler thread.
+_ACTIVE_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 def _missing_env() -> list[str]:
@@ -38,8 +57,16 @@ async def start_local_pipeline(
     The pipeline runs as a background asyncio task after this call returns,
     waiting for a WebRTC client to connect to the smallwebrtc transport.
     """
+    global _ACTIVE_LOOP  # CRITICAL: without this, module global stays None
+
     elevenlabs_key = elevenlabs_api_key or os.environ.get("ELEVENLABS_API_KEY", "")
     openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
+
+    # Model names come from env with sensible defaults
+    stt_model = os.environ.get("ELEVENLABS_STT_MODEL", "scribe_v2")
+    tts_model = os.environ.get("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
+    llm_model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "")
 
     missing = []
     if not elevenlabs_key:
@@ -65,21 +92,31 @@ async def start_local_pipeline(
         )
         from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
         from pipecat.transports.base_transport import TransportParams
-        from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
-        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-        from pipecat.services.openai.llm import OpenAILLMService
-        from pipecat.turns.user_turn_processor import UserTurnProcessor
-        from pipecat.turns.user_start import VADUserTurnStartStrategy
+        from pipecat.services.elevenlabs.stt import (
+            ElevenLabsSTTService,
+            ElevenLabsSTTSettings,
+        )
+        from pipecat.services.elevenlabs.tts import (
+            ElevenLabsTTSService,
+            ElevenLabsTTSSettings,
+        )
+        from pipecat.services.openai.llm import (
+            OpenAILLMService,
+        )
+        from pipecat.services.openai.base_llm import OpenAILLMSettings
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.task import PipelineTask, PipelineParams
         from pipecat.pipeline.runner import PipelineRunner
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import (
+            LLMContextAggregatorPair,
+            LLMUserAggregatorParams,
+        )
         from pipecat.processors.frameworks.rtvi import (
             RTVIProcessor,
             RTVIObserver,
             RTVIObserverParams,
-        )
-        from pipecat.processors.aggregators.llm_response import (
-            LLMFullResponseAggregator,
         )
     except ImportError as exc:
         return {
@@ -87,16 +124,39 @@ async def start_local_pipeline(
             "error": (
                 "Pipecat or smallwebrtc not installed: "
                 + str(exc)
-                + ". Install pipecat-ai[webrtc,elevenlabs] to use the local "
+                + ". Install pipecat-ai>=1.7.0,<1.8.0 to use the local "
                 "pipeline."
             ),
         }
 
-    # --- OpenAI LLM (actual LLM path, no echo fallback) ---
-    llm = OpenAILLMService(model="gpt-4o-mini", api_key=openai_key)
+    # --- LLM context ---
+    context = LLMContext()
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_turn_stop_timeout=5.0,
+            user_idle_timeout=0,
+        ),
+    )
+
+    # --- OpenAI LLM (settings pattern, avoids deprecation warning) ---
+    llm = OpenAILLMService(
+        api_key=openai_key,
+        settings=OpenAILLMSettings(
+            model=llm_model,
+            system_instruction=(
+                "You are a helpful assistant in a voice conversation. "
+                "Keep responses concise and natural for text-to-speech. "
+                "Avoid emojis, bullet points, and formatting that can't be spoken."
+            ),
+        ),
+    )
 
     # --- WebRTC connection + transport ---
+    connection_id = str(uuid.uuid4())
     connection = SmallWebRTCConnection()
+    ACTIVE_CONNECTIONS[connection_id] = connection
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
@@ -109,24 +169,21 @@ async def start_local_pipeline(
     )
 
     # --- Speech-to-text (ElevenLabs) ---
-    # ElevenLabsSTTService requires an aiohttp session. We create one here;
-    # it lives for the lifetime of the pipeline (no explicit cleanup for a
-    # short-lived local dev pipeline).
     session = aiohttp.ClientSession()
-    stt = ElevenLabsSTTService(api_key=elevenlabs_key, aiohttp_session=session)
-
-    # --- Text-to-speech (ElevenLabs) ---
-    tts = ElevenLabsTTSService(api_key=elevenlabs_key)
-
-    # --- Turn detection (VAD-based) ---
-    turn_processor = UserTurnProcessor(
-        user_turn_strategies=[VADUserTurnStartStrategy()],
-        user_turn_stop_timeout=5.0,
-        user_idle_timeout=0,
+    stt = ElevenLabsSTTService(
+        api_key=elevenlabs_key,
+        aiohttp_session=session,
+        settings=ElevenLabsSTTSettings(model=stt_model),
     )
 
-    # --- LLM response aggregation ---
-    response_aggregator = LLMFullResponseAggregator()
+    # --- Text-to-speech (ElevenLabs) ---
+    tts_settings_kwargs: dict = {"model": tts_model}
+    if voice_id:
+        tts_settings_kwargs["voice"] = voice_id
+    tts = ElevenLabsTTSService(
+        api_key=elevenlabs_key,
+        settings=ElevenLabsTTSSettings(**tts_settings_kwargs),
+    )
 
     # --- RTVI (real-time voice interface control channel) ---
     rtvi = RTVIProcessor(transport=transport)
@@ -134,15 +191,16 @@ async def start_local_pipeline(
     rtvi_params = RTVIObserverParams()
 
     # --- Build the pipeline ---
-    # transport.input()  → audio from WebRTC client
-    # transport.output() → audio to WebRTC client
+    # Order matches Pipecat 1.x docs:
+    # transport.input() → STT → user context aggregator → LLM →
+    #   assistant context aggregator → TTS → transport.output()
     pipeline = Pipeline(
         processors=[
             transport.input(),
-            turn_processor,
             stt,
+            user_aggregator,
             llm,
-            response_aggregator,
+            assistant_aggregator,
             tts,
             transport.output(),
         ],
@@ -166,20 +224,28 @@ async def start_local_pipeline(
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+    _ACTIVE_LOOP = loop
     loop.create_task(runner.run(task))
 
     logger.info(
-        "start_local_pipeline: pipeline started (llm=openai:gpt-4o-mini, stt=elevenlabs, tts=elevenlabs, transport=smallwebrtc)"
+        "start_local_pipeline: pipeline started (llm=openai:%s, stt=elevenlabs:%s, tts=elevenlabs:%s, transport=smallwebrtc, connection_id=%s)",
+        llm_model,
+        stt_model,
+        tts_model,
+        connection_id,
     )
 
     return {
         "ok": True,
         "transport": "smallwebrtc",
-        "stt": "elevenlabs",
-        "llm": "openai:gpt-4o-mini",
-        "tts": "elevenlabs",
+        "stt": "elevenlabs:" + stt_model,
+        "llm": "openai:" + llm_model,
+        "tts": "elevenlabs:" + tts_model,
+        "connection_id": connection_id,
+        "signaling_url": "http://localhost:8765",
         "note": (
-            "Pipeline started and running in the background. Waiting for a "
-            "WebRTC client to connect to the smallwebrtc transport."
+            "Pipeline started and running in the background. A WebRTC client "
+            "can connect by first GET /connections to discover the connection "
+            "id, then POST /offer with that connectionId at the signaling URL."
         ),
     }

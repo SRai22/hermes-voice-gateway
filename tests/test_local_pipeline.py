@@ -2,10 +2,8 @@
 
 Exercises start_local_pipeline() directly so you can verify:
   - Without ELEVENLABS_API_KEY or OPENAI_API_KEY -> ok: False, clear error message (no crash)
-  - With both keys set -> ok: False with ImportError message
-    (pipecat-ai is installed for system Python 3.12 but not Hermes's
-    Python 3.14 venv; the import-verified path is confirmed separately
-    against system Python 3.12)
+  - With both keys set -> ok: True, pipeline starts and runs in background
+    (pipecat-ai is installed in Hermes's Python venv)
 
 Run:  python3 tests/test_local_pipeline.py
 """
@@ -42,19 +40,22 @@ async def main() -> None:
     assert "OPENAI_API_KEY" in result["error"]
     print("PASS: clear error when OpenAI key missing")
 
-    print("\n=== Test 3: both keys present (pipecat not in Hermes venv) ===")
+    print("\n=== Test 3: both keys present (pipeline starts successfully) ===")
     os.environ["OPENAI_API_KEY"] = "sk-test-key-12345"
     result = await start_local_pipeline(
         elevenlabs_api_key="el-test-key-12345", openai_api_key="sk-test-key-12345"
     )
     print("Result:", result)
-    # pipecat-ai is installed for system Python 3.12 but not Hermes's 3.14 venv,
-    # so this hits the ImportError branch -> ok: False, not a crash.
-    assert result["ok"] is False, "should fail when pipecat not importable"
-    assert "Pipecat or smallwebrtc not installed" in result["error"]
-    print("PASS: clear ImportError message instead of crash")
+    assert result["ok"] is True, "pipeline should start with both keys"
+    assert result["transport"] == "smallwebrtc"
+    assert result["stt"] == "elevenlabs:scribe_v2"
+    assert result["llm"] == "openai:gpt-5.6-luna"
+    assert result["tts"] == "elevenlabs:eleven_flash_v2_5"
+    assert "connection_id" in result
+    assert result["signaling_url"] == "http://localhost:8765"
+    print("PASS: pipeline started with correct models")
 
-    print("\n=== Test 3: hook allows non-voice tools ===")
+    print("\n=== Test 4: hook allows non-voice tools ===")
     from hooks import on_pre_tool_call  # noqa: E402
     verdict = on_pre_tool_call(tool_name="files.read")
     assert verdict is None, "non-voice tools should not be blocked"

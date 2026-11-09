@@ -35,11 +35,10 @@ provides_tools:
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai>=0.5,<1.0"
-  - "openai>=1.0,<2"
+  - "pipecat-ai>=1.7.0,<1.8.0"
+  - "openai>=1.0"
   - "twilio>=8,<9"
   - "python-dotenv>=1.0,<2"
-  - "smallwebrtc>=0.1,<1.0"
 config_schema:
   voice_base_url:
     type: str

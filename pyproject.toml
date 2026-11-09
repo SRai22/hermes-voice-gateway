@@ -12,15 +12,26 @@ license = {text = "MIT"}
 authors = [{name = "Shravan Rai"}]
 keywords = ["hermes", "voice", "gateway", "twilio", "pipecat", "elevenlabs", "openai"]
 dependencies = [
-    "pipecat-ai>=0.5,<1.0",
-    "openai>=1.0,<2",
+    "pipecat-ai>=1.7.0,<1.8.0",
+    "openai>=1.0",
     "twilio>=8,<9",
     "python-dotenv>=1.0,<2",
-    "smallwebrtc>=0.1,<1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "ruff",
+]
+
+[tool.hatch.build]
+only-include = [
+    "plugin.yaml",
+    "__init__.py",
+    "schemas.py",
+    "tools.py",
+    "hooks.py",
+    "pipeline.py",
+    "README.md",
+    "LICENSE",
 ]
