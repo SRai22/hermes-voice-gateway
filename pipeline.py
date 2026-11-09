@@ -43,6 +43,10 @@ ACTIVE_CONNECTIONS: dict[str, object] = {}
 # HTTP handler thread.
 _ACTIVE_LOOP: asyncio.AbstractEventLoop | None = None
 
+# Port the signaling server listens on. Must match what signaling-server.py
+# expects via pipeline.SIGNALING_PORT.
+SIGNALING_PORT = 8765
+
 # The running pipeline task and its connection id. Held here so the task is not
 # garbage-collected and so a second call can reuse the running pipeline.
 _RUN_TASK: asyncio.Task | None = None
@@ -131,7 +135,6 @@ async def start_local_pipeline() -> dict:
             OpenAILLMService,
         )
         from pipecat.services.openai.base_llm import OpenAILLMSettings
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.task import PipelineTask, PipelineParams
         from pipecat.pipeline.runner import PipelineRunner
@@ -145,6 +148,8 @@ async def start_local_pipeline() -> dict:
             RTVIObserver,
             RTVIObserverParams,
         )
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.processors.audio.vad_processor import VADProcessor
     except ImportError as exc:
         return {
             "ok": False,
@@ -161,7 +166,7 @@ async def start_local_pipeline() -> dict:
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            # VAD bypassed for testing — all audio passes through to STT
             user_turn_stop_timeout=5.0,
             user_idle_timeout=0,
         ),
@@ -224,6 +229,10 @@ async def start_local_pipeline() -> dict:
     rtvi_observer = RTVIObserver(rtvi=rtvi)
     rtvi_params = RTVIObserverParams()
 
+    # --- VAD (voice activity detection) — required by SegmentedSTTService
+    # (ElevenLabsSTTService) to trigger transcription on speech segments ---
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
+
     # --- Build the pipeline ---
     # Order matches Pipecat 1.x docs:
     # transport.input() → STT → user context aggregator → LLM →
@@ -231,6 +240,7 @@ async def start_local_pipeline() -> dict:
     pipeline = Pipeline(
         processors=[
             transport.input(),
+            vad,
             stt,
             user_aggregator,
             llm,

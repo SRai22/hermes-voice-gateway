@@ -176,6 +176,7 @@
     </div>
 
     <div class="error-msg" id="errorMsg"></div>
+    <div id="audioDiagnostic" style="color:#9ca3af;font-size:.78rem;line-height:1.5;margin-bottom:14px;">Microphone and RTP not tested.</div>
 
     <button class="btn connect" id="connectBtn">Connect to Pipeline</button>
     <button class="btn disconnect" id="disconnectBtn">Disconnect</button>
@@ -203,288 +204,310 @@
   </div>
 
   <div class="debug" id="debug">
-    <div class="label">Signaling Log</div>
+    <div class="label">WebRTC / Audio Diagnostics</div>
     <div id="debugLog"></div>
   </div>
 </div>
 
 <script>
-(function() {
-  const STATUS_DISCONNECTED = 'disconnected';
-  const STATUS_CONNECTING = 'connecting';
-  const STATUS_CONNECTED = 'connected';
-  const STATUS_ERROR = 'error';
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const SIGNALING_URL = window.location.origin;
+  const connectBtn = $('connectBtn'), disconnectBtn = $('disconnectBtn');
+  const muteBtn = $('muteBtn'), statusDot = $('statusDot'), statusText = $('statusText');
+  const errorMsg = $('errorMsg'), transcript = $('transcript');
+  const localMeter = $('localMeter'), remoteMeter = $('remoteMeter');
+  const volumeInput = $('volume'), debugLog = $('debugLog'), debug = $('debug');
+  const audioDiagnostic = $('audioDiagnostic');
 
-  // DOM elements
-  const connectBtn = document.getElementById('connectBtn');
-  const disconnectBtn = document.getElementById('disconnectBtn');
-  const muteBtn = document.getElementById('muteBtn');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-  const errorMsg = document.getElementById('errorMsg');
-  const transcript = document.getElementById('transcript');
-  const localMeter = document.getElementById('localMeter');
-  const remoteMeter = document.getElementById('remoteMeter');
-  const volumeInput = document.getElementById('volume');
-  const debugLog = document.getElementById('debugLog');
-  const debug = document.getElementById('debug');
+  let pc = null, dataChannel = null, localStream = null, remoteAudio = null;
+  let audioCtx = null, localAnalyser = null, remoteAnalyser = null;
+  let localSource = null, remoteSource = null;
+  let meterAnimation = null, statsTimer = null;
+  let connectionId = null, isMuted = false, connecting = false;
+  let previousSentPackets = null, previousReceivedPackets = null;
 
-  // Config
-  const SIGNALING_URL = '';  // same origin: the signaling server serves this page
-
-  // State
-  let pc = null;
-  let localStream = null;
-  let remoteAudio = null;
-  let isMuted = false;
-  let connectionId = null;
-  let mediaRecorder = null;
-  let audioCtx = null;
-  let analyser = null;
-  let micSource = null;
-
-  function setStatus(status, text) {
-    statusDot.className = 'status-dot ' + status;
-    statusText.textContent = text;
-  }
-
-  function setError(msg) {
-    errorMsg.textContent = msg;
-    errorMsg.style.display = msg ? 'block' : 'none';
-  }
-
-  function log(msg) {
+  function log(message) {
     const line = document.createElement('div');
     line.className = 'debug-line';
-    line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    line.textContent = new Date().toLocaleTimeString() + ' ' + message;
     debugLog.appendChild(line);
     debugLog.scrollTop = debugLog.scrollHeight;
+    console.log('[Hermes]', message);
   }
-
-  function setTranscript(text) {
-    transcript.textContent = text;
+  function setStatus(state, message) {
+    statusDot.className = 'status-dot ' + state;
+    statusText.textContent = message;
   }
+  function setError(message) {
+    errorMsg.textContent = message;
+    errorMsg.style.display = message ? 'block' : 'none';
+  }
+  function setButtons(connected) {
+    connectBtn.style.display = connected ? 'none' : 'block';
+    connectBtn.disabled = connecting;
+    disconnectBtn.style.display = connected ? 'block' : 'none';
+    muteBtn.style.display = connected ? 'block' : 'none';
+  }
+  function setDiagnostic(message) { audioDiagnostic.textContent = message; }
 
-  async function startAudioVisualization(stream) {
+  // Shared Web Audio context for real microphone AND speaker meters.
+  async function createLocalMeter() {
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      micSource = audioCtx.createMediaStreamSource(stream);
-      micSource.connect(analyser);
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      function draw() {
-        if (!analyser) return;
-        analyser.getByteFrequencyData(dataArray);
-        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        const pct = Math.min(100, (avg / 255) * 300);
-        localMeter.querySelector('.meter-fill').style.width = pct + '%';
-        requestAnimationFrame(draw);
-      }
-      draw();
-    } catch (e) {
-      log('Audio visualization unavailable: ' + e.message);
+      await audioCtx.resume();
+      localAnalyser = audioCtx.createAnalyser();
+      localAnalyser.fftSize = 512;
+      localSource = audioCtx.createMediaStreamSource(localStream);
+      localSource.connect(localAnalyser); // Never connect the mic to speakers.
+      renderMeters();
+    } catch (error) { log('Mic meter unavailable: ' + error.message); }
+  }
+  function meterLevel(analyser) {
+    if (!analyser) return 0;
+    const values = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(values);
+    let energy = 0;
+    for (const value of values) {
+      const amplitude = (value - 128) / 128;
+      energy += amplitude * amplitude;
+    }
+    const rms = Math.sqrt(energy / values.length);
+    return Math.min(100, Math.round(rms * 450));
+  }
+  function renderMeters() {
+    localMeter.style.width = meterLevel(localAnalyser) + '%';
+    remoteMeter.style.width = meterLevel(remoteAnalyser) + '%';
+    meterAnimation = requestAnimationFrame(renderMeters);
+  }
+  function configureRemoteAudio(event) {
+    if (event.track.kind !== 'audio') return;
+    log('Remote audio track: state=' + event.track.readyState + ', muted=' + event.track.muted);
+    const stream = event.streams?.[0] || new MediaStream([event.track]);
+    if (!remoteAudio) {
+      remoteAudio = new Audio();
+      remoteAudio.autoplay = true;
+      remoteAudio.playsInline = true;
+      remoteAudio.volume = Number(volumeInput.value);
+    }
+    remoteAudio.srcObject = stream;
+    remoteAudio.play().catch(err => log('Remote playback blocked: ' + err.message));
+    if (audioCtx) {
+      try {
+        if (remoteSource) remoteSource.disconnect();
+        remoteAnalyser = audioCtx.createAnalyser();
+        remoteAnalyser.fftSize = 512;
+        remoteSource = audioCtx.createMediaStreamSource(stream);
+        remoteSource.connect(remoteAnalyser); // Meter only, audio plays via <audio>.
+      } catch (err) { log('Speaker meter unavailable: ' + err.message); }
     }
   }
 
-  async function createPeerConnection() {
-    const configuration = {
+  // The browser must create the SCTP data channel before createOffer().
+  function createPeerConnection() {
+    pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    dataChannel = pc.createDataChannel('rtvi-ai');
+    dataChannel.onopen = () => log('RTVI data channel OPEN');
+    dataChannel.onclose = () => log('RTVI data channel CLOSED');
+    dataChannel.onerror = () => log('RTVI data channel ERROR');
+    dataChannel.onmessage = event => {
+      // RTVI events are JSON and require protocol-aware handling for full transcripts.
+      // Do not mistake an empty transcript UI for a failed audio transport.
+      try {
+        const message = JSON.parse(event.data);
+        log('RTVI message: ' + String(message.type || message.label || 'untyped'));
+      } catch { log('RTVI message received (non-JSON)'); }
     };
-    pc = new RTCPeerConnection(configuration);
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && connectionId) {
-        log('ICE candidate: ' + event.candidate.candidate.slice(0, 60) + '...');
-        fetch(SIGNALING_URL + '/ice-candidate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            connectionId: connectionId,
-            candidate: event.candidate.candidate,
-            sdpMid: event.candidate.sdpMid,
-            sdpMLineIndex: event.candidate.sdpMLineIndex
-          })
-        }).catch(() => {});
-      }
-    };
-
     pc.onconnectionstatechange = () => {
-      log('Connection state: ' + pc.connectionState);
+      if (!pc) return;
+      log('Peer connection: ' + pc.connectionState);
       if (pc.connectionState === 'connected') {
-        setStatus(STATUS_CONNECTED, 'Connected — speak now');
-        connectBtn.style.display = 'none';
-        disconnectBtn.style.display = 'block';
-        muteBtn.style.display = 'block';
-        setError('');
-      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        setStatus(STATUS_DISCONNECTED, 'Disconnected');
-        connectBtn.style.display = 'block';
-        disconnectBtn.style.display = 'none';
-        muteBtn.style.display = 'none';
+        setStatus('connected', 'WebRTC connected — checking audio RTP');
+        setButtons(true);
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        setStatus('error', 'WebRTC ' + pc.connectionState);
+        setError('Peer connection ' + pc.connectionState + '. Press Disconnect, then reconnect.');
       }
     };
-
-    pc.ontrack = (event) => {
-      log('Remote track received');
-      const [track] = event.streams;
-      if (!remoteAudio) {
-        remoteAudio = new Audio();
-        remoteAudio.autoplay = true;
-        remoteAudio.volume = volumeInput.value;
-        remoteAudio.srcObject = track;
-        remoteAudio.play().catch(() => {});
-      }
-      volumeInput.addEventListener('input', () => {
-        if (remoteAudio) remoteAudio.volume = volumeInput.value;
-      });
-    };
-
+    pc.oniceconnectionstatechange = () => log('ICE state: ' + pc.iceConnectionState);
+    pc.ontrack = configureRemoteAudio;
     return pc;
   }
 
-  async function connect() {
-    setStatus(STATUS_CONNECTING, 'Connecting...');
-    setError('');
-
-    try {
-      // Step 1: Get microphone access
-      localStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 16000
-        },
-        video: false
-      });
-      startAudioVisualization(localStream);
-
-      // Step 2: Create peer connection
-      await createPeerConnection();
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-      // Step 3: Create offer
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true
-      });
-      await pc.setLocalDescription(offer);
-      log('Created SDP offer');
-
-      // Step 4a: Discover the active pipeline connection from the signaling server
-      const connResp = await fetch(SIGNALING_URL + '/connections');
-      const connData = await connResp.json();
-      if (!connData || connData.count < 1) {
-        throw new Error('No active pipeline connection on the signaling server');
+  function waitForIceGathering(peer, timeoutMs = 10000) {
+    if (peer.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        peer.removeEventListener('icegatheringstatechange', onChange);
+        reject(new Error('Timed out waiting for ICE candidates'));
+      }, timeoutMs);
+      function onChange() {
+        if (peer.iceGatheringState === 'complete') {
+          clearTimeout(timeout);
+          peer.removeEventListener('icegatheringstatechange', onChange);
+          resolve();
+        }
       }
-      const discoveredId = connData.connections[0];
-      log('Discovered connection id: ' + discoveredId);
-
-      // Step 4b: Send offer to signaling server
-      log('Sending offer to ' + SIGNALING_URL + '/offer');
-      const resp = await fetch(SIGNALING_URL + '/offer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          connectionId: discoveredId,
-          sdp: offer.sdp,
-          type: offer.type
-        })
-      });
-
-      if (!resp.ok) {
-        const errText = await resp.text();
-        throw new Error('Signaling server error: ' + resp.status + ' ' + errText);
-      }
-
-      const data = await resp.json();
-      connectionId = data.connectionId;
-      log('Got answer, connectionId=' + connectionId);
-
-      // Step 5: Set remote description
-      await pc.setRemoteDescription({
-        sdp: data.sdp,
-        type: data.type
-      });
-      log('Remote description set');
-
-      // Start remote audio level visualization
-      function drawRemote() {
-        if (!remoteMeter) return;
-        // Simulate remote audio level from Web Audio if available
-        requestAnimationFrame(drawRemote);
-      }
-      drawRemote();
-
-    } catch (err) {
-      log('Error: ' + err.message);
-      setError(err.message);
-      setStatus(STATUS_ERROR, 'Connection failed');
-      cleanup();
-    }
+      peer.addEventListener('icegatheringstatechange', onChange);
+    });
   }
 
-  function disconnect() {
-    cleanup();
-    setStatus(STATUS_DISCONNECTED, 'Disconnected');
-    connectBtn.style.display = 'block';
-    disconnectBtn.style.display = 'none';
-    muteBtn.style.display = 'none';
-    setTranscript('Say something after connecting...');
-    localMeter.querySelector('.meter-fill').style.width = '0%';
-    remoteMeter.querySelector('.meter-fill').style.width = '0%';
-    connectionId = null;
+  async function inspectAudioStats() {
+    if (!pc || pc.connectionState !== 'connected') return;
+    const track = localStream?.getAudioTracks()[0];
+    const sender = pc.getSenders().find(s => s.track?.kind === 'audio');
+    const transceiver = pc.getTransceivers().find(t => t.sender === sender);
+    let outbound = null, inbound = null, micLevel = null;
+    const stats = await pc.getStats();
+    stats.forEach(r => {
+      if (r.type === 'outbound-rtp' && !r.isRemote && (r.kind === 'audio' || r.mediaType === 'audio')) outbound = r;
+      if (r.type === 'inbound-rtp' && !r.isRemote && (r.kind === 'audio' || r.mediaType === 'audio')) inbound = r;
+      if (r.type === 'media-source' && r.kind === 'audio') micLevel = r.audioLevel;
+    });
+    const sent = outbound?.packetsSent ?? null;
+    const received = inbound?.packetsReceived ?? null;
+    const deltaSent = sent === null || previousSentPackets === null ? null : sent - previousSentPackets;
+    const deltaReceived = received === null || previousReceivedPackets === null ? null : received - previousReceivedPackets;
+    previousSentPackets = sent;
+    previousReceivedPackets = received;
+    const details = [
+      'Mic: ' + (track ? `${track.readyState}, enabled=${track.enabled}, muted=${track.muted}` : 'MISSING'),
+      'send direction: ' + (transceiver?.currentDirection || 'unknown'),
+      'RTP sent: ' + (sent ?? 'not reported') + ' (+' + (deltaSent ?? '?') + '/2s)',
+      'RTP received: ' + (received ?? 'not reported') + ' (+' + (deltaReceived ?? '?') + '/2s)',
+      'mic audioLevel: ' + (micLevel == null ? 'n/a' : micLevel.toFixed(3))
+    ];
+    setDiagnostic(details.join(' | '));
+    log(details.join(' | '));
+    if (deltaSent !== null && deltaSent > 0) {
+      setStatus('connected', 'WebRTC connected — microphone RTP sending');
+    } else if (deltaSent === 0) {
+      setStatus('error', 'Connected, but microphone RTP not increasing');
+    }
+  }
+  function startStats() {
+    if (statsTimer) clearInterval(statsTimer);
+    previousSentPackets = null;
+    previousReceivedPackets = null;
+    statsTimer = setInterval(() => {
+      inspectAudioStats().catch(err => log('RTP stats error: ' + err.message));
+    }, 2000);
+  }
+
+  async function connect() {
+    if (connecting || pc) return;
+    connecting = true;
+    setButtons(false);
+    setStatus('connecting', 'Requesting microphone...');
+    setError('');
+    setDiagnostic('Starting microphone capture...');
+    try {
+      // Browser negotiates the Opus RTP codec; do not force 16 kHz capture.
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const mic = localStream.getAudioTracks()[0];
+      if (!mic) throw new Error('Browser did not return an audio track');
+      log('Microphone captured: ' + mic.label + ', state=' + mic.readyState);
+      mic.onended = () => log('Microphone track ENDED');
+      mic.onmute = () => log('Microphone track MUTED by source');
+      mic.onunmute = () => log('Microphone track UNMUTED by source');
+      await createLocalMeter();
+      createPeerConnection();
+      pc.addTrack(mic, localStream);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      // Complete ICE gathering before sending the offer: no trickle endpoint required.
+      await waitForIceGathering(pc);
+      const localSdp = pc.localDescription.sdp;
+      log('Offer has audio=' + localSdp.includes('m=audio') + ', data=' + localSdp.includes('m=application'));
+      setStatus('connecting', 'Negotiating with pipeline...');
+
+      const connResp = await fetch(SIGNALING_URL + '/connections');
+      if (!connResp.ok) throw new Error('GET /connections failed: HTTP ' + connResp.status);
+      const connData = await connResp.json();
+      const connections = connData.connections || [];
+      if (connections.length !== 1) {
+        throw new Error(`Expected exactly one active pipeline connection; found ${connections.length}. Backend must select the correct PipelineTask connection.`);
+      }
+      connectionId = connections[0];
+      log('Pipeline connection ID: ' + connectionId);
+      const response = await fetch(SIGNALING_URL + '/offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionId, sdp: localSdp, type: 'offer' })
+      });
+      if (!response.ok) throw new Error('POST /offer failed: HTTP ' + response.status + ' ' + await response.text());
+      const answer = await response.json();
+      if (!answer?.sdp || answer.type !== 'answer') throw new Error('Invalid SDP answer from /offer');
+      log('Answer has audio=' + answer.sdp.includes('m=audio') + ', data=' + answer.sdp.includes('m=application'));
+      if (answer.connectionId && answer.connectionId !== connectionId) {
+        throw new Error('Signaling returned a different connection ID than requested');
+      }
+      await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+      log('Remote description applied');
+      startStats();
+      setDiagnostic('Waiting for peer connection and first audio RTP measurements...');
+    } catch (error) {
+      log('Connect error: ' + error.message);
+      cleanup();
+      setStatus('error', 'Connection failed');
+      setError(error.message);
+    } finally {
+      connecting = false;
+      connectBtn.disabled = false;
+    }
   }
 
   function cleanup() {
-    if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
-    if (pc) {
-      pc.close();
-      pc = null;
-    }
-    if (remoteAudio) {
-      remoteAudio.pause();
-      remoteAudio.srcObject = null;
-      remoteAudio = null;
-    }
-    if (audioCtx) {
-      try { audioCtx.close(); } catch (e) {}
-      audioCtx = null;
-    }
-    micSource = null;
-    analyser = null;
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    if (meterAnimation !== null) { cancelAnimationFrame(meterAnimation); meterAnimation = null; }
+    if (dataChannel) { dataChannel.close(); dataChannel = null; }
+    if (pc) { pc.ontrack = null; pc.onconnectionstatechange = null; pc.close(); pc = null; }
+    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+    if (remoteAudio) { remoteAudio.pause(); remoteAudio.srcObject = null; remoteAudio = null; }
+    if (localSource) { localSource.disconnect(); localSource = null; }
+    if (remoteSource) { remoteSource.disconnect(); remoteSource = null; }
+    localAnalyser = null;
+    remoteAnalyser = null;
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+    localMeter.style.width = '0%';
+    remoteMeter.style.width = '0%';
+    connectionId = null;
+    isMuted = false;
+    muteBtn.classList.remove('active');
+    muteBtn.textContent = 'Mute Microphone';
+    previousSentPackets = previousReceivedPackets = null;
+    setButtons(false);
   }
-
+  function disconnect() {
+    cleanup();
+    setStatus('disconnected', 'Disconnected');
+    setError('');
+    setDiagnostic('Microphone and RTP not tested.');
+    transcript.textContent = 'Say something after connecting...';
+  }
   muteBtn.addEventListener('click', () => {
     isMuted = !isMuted;
-    if (localStream) {
-      localStream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
-    }
+    localStream?.getAudioTracks().forEach(track => { track.enabled = !isMuted; });
     muteBtn.classList.toggle('active', isMuted);
     muteBtn.textContent = isMuted ? 'Unmute Microphone' : 'Mute Microphone';
+    log('Microphone ' + (isMuted ? 'disabled' : 'enabled'));
   });
-
   volumeInput.addEventListener('input', () => {
-    if (remoteAudio) remoteAudio.volume = volumeInput.value;
+    if (remoteAudio) remoteAudio.volume = Number(volumeInput.value);
   });
-
   connectBtn.addEventListener('click', connect);
   disconnectBtn.addEventListener('click', disconnect);
-
-  // Toggle debug
-  document.body.addEventListener('keydown', (e) => {
-    if (e.key === 'd' || e.key === 'D') {
+  document.body.addEventListener('keydown', event => {
+    if ((event.key === 'd' || event.key === 'D') && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
       debug.classList.toggle('show');
     }
   });
-
-  // Initial state
-  setStatus(STATUS_DISCONNECTED, 'Disconnected');
-  log('Frontend loaded. Signaling URL: ' + SIGNALING_URL);
-  log('Press D to toggle debug log');
+  setStatus('disconnected', 'Disconnected');
+  setButtons(false);
+  log('Frontend ready; signaling at ' + SIGNALING_URL + '; press D for diagnostics.');
 })();
 </script>
 </body>

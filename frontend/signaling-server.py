@@ -40,7 +40,7 @@ logger = logging.getLogger("voice-signaling")
 
 HOST = "127.0.0.1"
 PORT = pipeline.SIGNALING_PORT
-ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
+ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}", "http://127.0.0.1:5500"}
 MAX_BODY = 64 * 1024
 INDEX_FILE = os.path.join(PLUGIN_DIR, "frontend", "index.html")
 _OFFER_LOCKS: dict[str, asyncio.Lock] = {}
@@ -68,6 +68,7 @@ class SignalingHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -102,6 +103,17 @@ class SignalingHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "body must be a JSON object"})
             return None
         return body
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests from browsers."""
+        if not self._origin_ok():
+            return
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
 
     def do_GET(self):
         if not self._origin_ok():
@@ -179,8 +191,36 @@ class SignalingHandler(BaseHTTPRequestHandler):
             logger.error("Signaling: initialize timed out for %s", cid)
             self._send_json(504, {"error": "initialize timed out"})
         except Exception as exc:
+            err_msg = str(exc)
+            # If the WebRTC connection is closed (stale from a previous session),
+            # replace it with a fresh connection and retry once.
+            if "closed" in err_msg.lower() and cid in pipeline.ACTIVE_CONNECTIONS:
+                logger.warning("Connection %s is closed, replacing with new connection", cid)
+                del pipeline.ACTIVE_CONNECTIONS[cid]
+                from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+                new_conn = SmallWebRTCConnection()
+                pipeline.ACTIVE_CONNECTIONS[cid] = new_conn
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        _initialize_offer(new_conn, cid, sdp, sdp_type), loop
+                    )
+                    answer = future.result(timeout=15)
+                    if answer is None:
+                        self._send_json(500, {"error": "no answer available"})
+                        return
+                    logger.info("Signaling: answer returned for recovered connection %s", cid)
+                    self._send_json(200, {
+                        "connectionId": cid,
+                        "sdp": answer["sdp"],
+                        "type": answer.get("type", "answer"),
+                    })
+                    return
+                except Exception as exc2:
+                    logger.exception("Signaling: retry offer failed for %s", cid)
+                    self._send_json(500, {"error": str(exc2)})
+                    return
             logger.exception("Signaling: offer failed for %s", cid)
-            self._send_json(500, {"error": str(exc)})
+            self._send_json(500, {"error": err_msg})
 
     def _handle_ice_candidate(self, body: dict):
         cid = body.get("connectionId")
