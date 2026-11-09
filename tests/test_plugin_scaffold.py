@@ -46,25 +46,45 @@ class FakeCtx:
         self.hooks.append((hook_name, callback.__name__))
 
 
-def test_register_wires_tools_and_hook() -> None:
+def test_register_wires_tools_and_hook(monkeypatch) -> None:
+    for var in ("ELEVENLABS_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
     mod = _load_plugin_init()
     ctx = FakeCtx()
     mod.register(ctx)
 
     names = [tool[0] for tool in ctx.tools]
-    assert "voice.route_inbound" in names, names
-    assert "voice.propose_callback" in names, names
-    assert "voice.check_call_status" in names, names
-    assert "voice.start_local_pipeline" in names, names
+    for name in (
+        "voice.route_inbound",
+        "voice.propose_callback",
+        "voice.check_call_status",
+        "voice.start_local_pipeline",
+    ):
+        assert name in names, names
 
     assert ctx.hooks == [("pre_tool_call", "on_pre_tool_call")], ctx.hooks
 
-    # Sanity: the hook blocks voice tools when env is missing, allows others.
-    assert mod.on_pre_tool_call(tool_name="voice.route_inbound") is not None
-    assert mod.on_pre_tool_call(tool_name="voice.start_local_pipeline") is not None
+    # Keys missing: voice tools are blocked, other tools pass.
+    assert mod.on_pre_tool_call(tool_name="voice.route_inbound")["action"] == "block"
+    assert mod.on_pre_tool_call(tool_name="voice.start_local_pipeline")["action"] == "block"
     assert mod.on_pre_tool_call(tool_name="files.read") is None
 
 
-if __name__ == "__main__":
-    test_register_wires_tools_and_hook()
-    print("SMOKE OK")
+def test_hook_allows_voice_tools_when_keys_set(monkeypatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "y")
+    mod = _load_plugin_init()
+    assert mod.on_pre_tool_call(tool_name="voice.route_inbound") is None
+
+
+def test_stub_tools_do_not_claim_success() -> None:
+    mod = _load_plugin_init()
+    assert mod.route_inbound(call_sid="CA1")["ok"] is False
+    assert mod.propose_callback(destination="x", brief="y")["ok"] is False
+    assert mod.check_call_status(call_sid="CA1")["ok"] is False
+
+
+def test_local_pipeline_schema_takes_no_secrets() -> None:
+    mod = _load_plugin_init()
+    assert mod.LOCAL_PIPELINE_SCHEMA["properties"] == {}
+    assert "required" not in mod.LOCAL_PIPELINE_SCHEMA

@@ -8,12 +8,6 @@ license: MIT
 homepage: https://github.com/shravanrai/hermes-voice-gateway
 tags: [voice, gateway, twilio, pipecat, callback, smallwebrtc, local-audio, elevenlabs, openai]
 requires_env:
-  - name: TWILIO_ACCOUNT_SID
-    description: Twilio Account SID for the voice gateway
-    secret: true
-  - name: TWILIO_AUTH_TOKEN
-    description: Twilio Auth Token
-    secret: true
   - name: ELEVENLABS_API_KEY
     description: ElevenLabs API key for STT and TTS in the local Pipecat pipeline
     secret: true
@@ -21,6 +15,12 @@ requires_env:
     description: OpenAI API key for the LLM in the local Pipecat pipeline
     secret: true
 optional_env:
+  - name: TWILIO_ACCOUNT_SID
+    description: Twilio Account SID (not used yet; phone tools are scaffolds)
+    secret: true
+  - name: TWILIO_AUTH_TOKEN
+    description: Twilio Auth Token (not used yet; phone tools are scaffolds)
+    secret: true
   - name: TWILIO_NUMBER
     description: Outbound caller ID / business phone number (E.164)
     secret: false
@@ -35,10 +35,7 @@ provides_tools:
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai>=1.7.0,<1.8.0"
-  - "openai>=1.0"
-  - "twilio>=8,<9"
-  - "python-dotenv>=1.0,<2"
+  - "pipecat-ai[elevenlabs,openai,silero,webrtc]>=1.7.0,<1.8.0"
 config_schema:
   voice_base_url:
     type: str

@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 import os
 
-logger = logging.getLogger(__name__)
+from .pipeline import REQUIRED_ENV
 
-REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
+logger = logging.getLogger(__name__)
 
 
 def on_pre_tool_call(tool_name: str = "", args=None, **kwargs):

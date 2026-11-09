@@ -6,16 +6,13 @@ build-backend = "hatchling.build"
 name = "hermes-voice-gateway"
 version = "0.1.0"
 description = "Pipecat-powered voice gateway connecting Hermes to business phone lines (Twilio Voice)."
-requires-python = ">=3.9"
+requires-python = ">=3.11"  # pipecat-ai 1.7 needs 3.11+
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Shravan Rai"}]
 keywords = ["hermes", "voice", "gateway", "twilio", "pipecat", "elevenlabs", "openai"]
 dependencies = [
-    "pipecat-ai>=1.7.0,<1.8.0",
-    "openai>=1.0",
-    "twilio>=8,<9",
-    "python-dotenv>=1.0,<2",
+    "pipecat-ai[elevenlabs,openai,silero,webrtc]>=1.7.0,<1.8.0",
 ]
 
 [project.optional-dependencies]

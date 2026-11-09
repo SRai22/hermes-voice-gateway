@@ -58,18 +58,10 @@ CHECK_STATUS_SCHEMA = {
     "additionalProperties": False,
 }
 
+# No arguments: keys are read from ELEVENLABS_API_KEY / OPENAI_API_KEY in the
+# environment so secrets never pass through the model or its transcript.
 LOCAL_PIPELINE_SCHEMA = {
     "type": "object",
-    "properties": {
-        "elevenlabs_api_key": {
-            "type": "string",
-            "description": "ElevenLabs API key for STT/TTS. Falls back to the ELEVENLABS_API_KEY env var if omitted.",
-        },
-        "openai_api_key": {
-            "type": "string",
-            "description": "OpenAI API key for the LLM. Falls back to the OPENAI_API_KEY env var if omitted.",
-        },
-    },
-    "required": ["elevenlabs_api_key", "openai_api_key"],
+    "properties": {},
     "additionalProperties": False,
 }

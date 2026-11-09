@@ -23,7 +23,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 
-PLUGIN_DIR = "/home/shravanrai/Git/hermes-voice-gateway"
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
@@ -62,7 +62,7 @@ async def main() -> int:
         target=signaling_server.main, daemon=True, name="voice-signaling"
     )
     server_thread.start()
-    print("Signaling server started on http://0.0.0.0:8765", flush=True)
+    print("Signaling server started on http://127.0.0.1:8765", flush=True)
 
     stop = asyncio.get_event_loop().create_future()
     try:
