@@ -20,7 +20,7 @@
 - Added smallwebrtc and openai to python_dependencies with upper bounds
 - Registered voice.start_local_pipeline in __init__.py and declared it in plugin.yaml
 - Updated smoke test and practical test for the new provider stack
-- Verified API signatures against pipecat v1.7.0 (the pinned range): async add_ice_candidate, extras elevenlabs/openai/silero/webrtc, Python >=3.11
+- Verified API signatures against pipecat 1.15.0 (the pinned range): async add_ice_candidate, extras elevenlabs/openai/silero/webrtc, Python >=3.11
 - Wrote frontend/index.html — browser WebRTC voice UI (connect, mute, volume, audio meters, transcript)
 - Wrote frontend/signaling-server.py — HTTP signaling server bridging browser SDP offers to the running Pipecat pipeline
 - Exposed ACTIVE_CONNECTIONS registry and _ACTIVE_LOOP in pipeline.py for signaling
@@ -30,14 +30,15 @@
 - Twilio inbound calls (stage 1): plugin is now `kind: platform`. `adapter.py` answers calls (signature-checked webhook, allowlist, one-time stream token), runs a Pipecat pipeline (Twilio audio -> ElevenLabs realtime STT), hands transcripts to Hermes as messages, and speaks Hermes' replies with ElevenLabs TTS. `voice.route_inbound` removed (the adapter replaces it).
 - Secrets read through Hermes scoped secrets (`_env.secret`), falling back to os.environ only without Hermes
 
+- Stage 2: `voice_check_call_status` (Twilio REST lookup by call SID or callback id) and `voice_propose_callback` plus the human-only `/voice-callback list|show|approve|deny` command. Approval dials through Twilio; the callee's answer hits the signed `/voice/outbound` webhook, which opens the same media pipeline with an opening message for Hermes.
+- Fixed from reading Hermes' dispatcher: tool handlers are now `handler(args: dict, **kwargs) -> JSON string`; tool names use underscores (`voice_*`) because model APIs reject dots.
+
 ## In progress
 - Waiting on a real call test (needs Hermes + Twilio + a public URL); see docs/checks.md
 
 ## Up next (one piece at a time)
-- Stage 2: `voice.check_call_status` (Twilio REST lookup)
-- Stage 2: `voice.propose_callback` (store pending in plugin storage, operator approval, then outbound dial); approval UX still undecided
+- Answering-machine detection for callbacks; Twilio status callbacks to update stored status
 - Barge-in (caller interrupts Hermes mid-sentence) is not handled yet
-- Tool handlers still use the old keyword signature; Hermes documents `handler(args: dict, **kwargs) -> str` returning JSON
 
 ## Definition of done for each piece
 - Hermes validate and doctor both pass

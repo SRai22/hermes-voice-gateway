@@ -33,6 +33,9 @@ optional_env:
   - name: VOICE_WEBHOOK_PORT
     description: Local port for the call server (default 8081)
     password: false
+  - name: VOICE_MAX_CALL_SECONDS
+    description: Longest a call may last before Hermes says goodbye and hangs up (default 1800; 0 = no limit)
+    password: false
   - name: VOICE_MAX_CALLS
     description: Maximum simultaneous calls (default 5)
     password: false
@@ -43,17 +46,17 @@ optional_env:
     description: ElevenLabs voice for replies
     password: false
   - name: OPENAI_API_KEY
-    description: Only for the local dev pipeline (voice.start_local_pipeline)
+    description: Only for the local dev pipeline (voice_start_local_pipeline)
     password: true
   - name: TWILIO_PHONE_NUMBER
-    description: Outbound caller ID (E.164); used by the planned callback feature
+    description: Outbound caller ID (E.164). Required to dial approved callbacks
     password: false
 provides_tools:
-  - voice.propose_callback
-  - voice.check_call_status
-  - voice.start_local_pipeline
+  - voice_propose_callback
+  - voice_check_call_status
+  - voice_start_local_pipeline
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.7.0,<1.8.0"
+  - "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.15.0,<1.16.0"
   - "uvicorn>=0.32,<1"

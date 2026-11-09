@@ -19,7 +19,7 @@ from starlette.websockets import WebSocketDisconnect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _hermes_stubs import load_adapter_module  # noqa: E402
+from _hermes_stubs import load_adapter_module, use_memory_db  # noqa: E402
 
 BASE = "https://example.test"
 TOKEN = "auth-token"
@@ -259,3 +259,119 @@ def test_end_call_closes_websocket_when_pipeline_not_built(make) -> None:
     call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1", websocket=WS())
     asyncio.run(adapter._end_call(call))
     assert closed == [True]
+
+
+def test_call_pipeline_builds_with_real_pipecat(make, monkeypatch) -> None:
+    """Needs pipecat installed. Catches renamed classes/kwargs on a Pipecat upgrade."""
+    pytest.importorskip("pipecat")
+    from pipecat.pipeline.worker import PipelineWorker
+    from pipecat.workers.runner import WorkerRunner
+
+    adapter, _ = make()
+    seen = {}
+
+    async def fake_add(self, *workers):  # no network: just record the worker
+        seen["task"] = workers[0]
+
+    async def fake_run(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(WorkerRunner, "add_workers", fake_add)
+    monkeypatch.setattr(WorkerRunner, "run", fake_run)
+
+    class FakeWebSocket:  # FastAPIWebsocketTransport only stores it until the pipeline starts
+        pass
+
+    call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1")
+    asyncio.run(adapter._run_call(FakeWebSocket(), call, "MZ1"))
+    assert isinstance(call.task, PipelineWorker) and seen["task"] is call.task
+
+
+def test_call_time_limit_says_goodbye_then_ends(make, monkeypatch) -> None:
+    pytest.importorskip("pipecat")
+    adapter, _ = make(VOICE_MAX_CALL_SECONDS="1")
+    adapter._max_call_seconds = 0.01
+    queued = []
+
+    class FakeTask:
+        async def queue_frame(self, frame):
+            queued.append(type(frame).__name__)
+
+    asyncio.run(adapter._enforce_max_duration(FakeTask()))
+    assert queued == ["TTSSpeakFrame", "EndFrame"]
+
+
+# -- outbound callbacks ---------------------------------------------------------
+
+def _sign_url(url: str, params: dict) -> str:
+    data = url + "".join(k + params[k] for k in sorted(params))
+    return base64.b64encode(hmac.new(TOKEN.encode(), data.encode(), hashlib.sha1).digest()).decode()
+
+
+def _post_outbound(client, cb, params, signature=None):
+    url = f"{BASE}/voice/outbound?cb={cb}"
+    sig = signature if signature is not None else _sign_url(url, params)
+    return client.post(
+        f"/voice/outbound?cb={cb}", content=urllib.parse.urlencode(params),
+        headers={"content-type": "application/x-www-form-urlencoded", "x-twilio-signature": sig})
+
+
+@pytest.fixture()
+def dialing(make, monkeypatch):
+    adapter, client = make()
+    conn = use_memory_db(monkeypatch)
+    callbacks = sys.modules[adapter.__class__.__module__.rsplit(".", 1)[0] + ".callbacks"]
+    store = callbacks.CallbackStore(conn)
+    cb = store.propose(CALLER, "Confirm tomorrow's appointment", "")
+    store.claim_for_dial(cb)
+    return adapter, client, cb
+
+
+OUT = {"To": CALLER, "From": "+15559990000", "CallSid": "CA" + "b" * 32}
+
+
+def test_answered_callback_opens_a_stream_with_the_approved_purpose(dialing) -> None:
+    adapter, client, cb = dialing
+    resp = _post_outbound(client, cb, OUT)
+    assert resp.status_code == 200 and "<Connect>" in resp.text
+    token = resp.text.split('name="token" value="')[1].split('"')[0]
+    info = adapter._tokens.redeem(token)
+    assert info["caller"] == CALLER and "Confirm tomorrow" in info["opening"]
+
+
+def test_outbound_webhook_cannot_be_replayed_or_redirected(dialing) -> None:
+    adapter, client, cb = dialing
+    assert _post_outbound(client, cb, {**OUT, "To": "+15553334444"}).status_code == 403  # wrong number
+    assert _post_outbound(client, cb, OUT).status_code == 200
+    assert _post_outbound(client, cb, OUT).status_code == 403  # replay
+
+
+def test_outbound_webhook_needs_a_valid_signature_and_id(dialing) -> None:
+    _, client, cb = dialing
+    assert _post_outbound(client, cb, OUT, signature="bad").status_code == 403
+    assert _post_outbound(client, "../../x", OUT).status_code == 400
+    assert _post_outbound(client, "00000000", OUT).status_code == 403  # signed, but no such callback
+    assert _post_outbound(client, cb, OUT).status_code == 200  # the real one still works
+
+
+def test_media_opening_is_kept_on_the_call(make) -> None:
+    adapter, _ = make()
+    call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1", opening="hi")
+    assert call.opening == "hi"
+
+
+def test_callee_who_cannot_be_connected_does_not_leave_the_callback_answered(dialing) -> None:
+    adapter, client, cb = dialing
+    adapter._calls[CALLER] = object()  # callee is already on a live call: admission says busy
+    resp = _post_outbound(client, cb, OUT)
+    assert "<Connect>" not in resp.text
+    callbacks = sys.modules[adapter.__class__.__module__.rsplit(".", 1)[0] + ".callbacks"]
+    with callbacks.open_store() as store:
+        assert store.get(cb)["status"] == "failed"
+
+
+def test_opening_message_frames_the_purpose_as_data(dialing) -> None:
+    adapter, client, cb = dialing
+    token = _post_outbound(client, cb, OUT).text.split('name="token" value="')[1].split('"')[0]
+    opening = adapter._tokens.redeem(token)["opening"]
+    assert "not an instruction" in opening and '"Confirm tomorrow' in opening

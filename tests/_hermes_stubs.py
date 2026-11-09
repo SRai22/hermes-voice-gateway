@@ -3,6 +3,7 @@ imports the plugin (by file path, under an assigned package name)."""
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 import types
 from dataclasses import dataclass, field
@@ -89,3 +90,12 @@ def load_plugin():
 def load_adapter_module():
     load_plugin()
     return importlib.import_module(PACKAGE + ".adapter")
+
+
+def use_memory_db(monkeypatch):
+    """Point the callback store at one shared in-memory SQLite database."""
+    callbacks = importlib.import_module(PACKAGE + ".callbacks")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    monkeypatch.setattr(callbacks, "_connect", lambda: conn)
+    monkeypatch.setattr(callbacks, "_release", lambda c: None)
+    return conn

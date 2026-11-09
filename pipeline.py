@@ -33,7 +33,7 @@ except ImportError:  # imported top-level by the dev scripts
 
 logger = logging.getLogger(__name__)
 
-# Keys the local dev pipeline needs (hooks.py imports it for voice.start_local_pipeline).
+# Keys the local dev pipeline needs (hooks.py imports it for voice_start_local_pipeline).
 REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 SIGNALING_PORT = 8765
@@ -61,7 +61,8 @@ _RUN_INFO: dict = {}
 async def _run_pipeline(runner, task, session, connection_id: str) -> None:
     """Run the pipeline, then release its HTTP session and connection entry."""
     try:
-        await runner.run(task)
+        await runner.add_workers(task)
+        await runner.run()
     except Exception:
         logger.exception("pipeline %s crashed", connection_id)
     finally:
@@ -141,8 +142,8 @@ async def start_local_pipeline() -> dict:
         )
         from pipecat.services.openai.base_llm import OpenAILLMSettings
         from pipecat.pipeline.pipeline import Pipeline
-        from pipecat.pipeline.task import PipelineTask, PipelineParams
-        from pipecat.pipeline.runner import PipelineRunner
+        from pipecat.pipeline.worker import PipelineWorker, PipelineParams
+        from pipecat.workers.runner import WorkerRunner
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.aggregators.llm_response_universal import (
             LLMContextAggregatorPair,
@@ -162,7 +163,7 @@ async def start_local_pipeline() -> dict:
                 "Pipecat or smallwebrtc not installed: "
                 + str(exc)
                 + ". Install pipecat-ai[elevenlabs,openai,silero,webrtc]"
-                ">=1.7.0,<1.8.0 to use the local pipeline."
+                ">=1.15.0,<1.16.0 to use the local pipeline."
             ),
         }
 
@@ -256,14 +257,14 @@ async def start_local_pipeline() -> dict:
     )
 
     # --- Pipeline task + runner ---
-    task = PipelineTask(
+    task = PipelineWorker(
         pipeline,
         params=PipelineParams(),
         enable_rtvi=True,
         rtvi_processor=rtvi,
         rtvi_observer_params=rtvi_params,
     )
-    runner = PipelineRunner()
+    runner = WorkerRunner()
 
     # Start the runner as a background task so this function returns
     # immediately while the pipeline keeps running and waiting for a

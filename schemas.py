@@ -11,11 +11,11 @@ PROPOSE_CALLBACK_SCHEMA = {
     "properties": {
         "destination": {
             "type": "string",
-            "description": "Phone number to call back (E.164).",
+            "description": "Phone number to call back (E.164). Must be on the gateway's allowed list.",
         },
         "brief": {
             "type": "string",
-            "description": "Short reason for the callback the operator approves.",
+            "description": "One sentence on why the call is made. The operator reads it before approving, and it is given to the agent as the call's purpose.",
         },
         "staff_member": {
             "type": "string",
@@ -31,10 +31,13 @@ CHECK_STATUS_SCHEMA = {
     "properties": {
         "call_sid": {
             "type": "string",
-            "description": "Call SID whose provider status to look up.",
+            "description": "Twilio Call SID (CA followed by 32 hex characters). Give this or callback_id.",
+        },
+        "callback_id": {
+            "type": "string",
+            "description": "Id returned by voice_propose_callback. Reports the callback and its call.",
         },
     },
-    "required": ["call_sid"],
     "additionalProperties": False,
 }
 

@@ -2,7 +2,7 @@
 """Known-good runner: start the hermes-voice-gateway local Pipecat pipeline + signaling server in ONE process.
 
 Loads secrets from ~/.hermes/.env, invokes the plugin's real
-voice.start_local_pipeline handler, then runs frontend/signaling-server.py's
+voice_start_local_pipeline handler, then runs frontend/signaling-server.py's
 HTTP server (port 8765) in a daemon thread so a browser can POST SDP offers
 and connect end to end.
 

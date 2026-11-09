@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import time
 import urllib.parse
@@ -16,6 +17,14 @@ from xml.sax.saxutils import quoteattr
 def redact_phone(number: str) -> str:
     """Keep only the last 4 digits for logs."""
     return "***" + number[-4:] if len(number) > 4 else "***"
+
+
+_NUMBER_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+
+
+def scrub_numbers(text: str) -> str:
+    """Replace anything that looks like a phone number (Twilio errors can echo them)."""
+    return _NUMBER_RE.sub("[number]", text)
 
 
 def parse_allowed(csv: str) -> set[str]:

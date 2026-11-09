@@ -1,7 +1,7 @@
 """Minimal HTTP signaling server for the Hermes voice-gateway local pipeline.
 
 Bridges a browser WebRTC client (frontend/index.html) to the Pipecat pipeline
-started by ``voice.start_local_pipeline``. It also serves index.html itself, so
+started by ``voice_start_local_pipeline``. It also serves index.html itself, so
 the page and the API share one origin and no CORS is needed.
 
 Endpoints:

@@ -1,7 +1,8 @@
 """Hermes Voice Gateway plugin: ``register(ctx)`` entry point.
 
 Registers a ``voice`` platform (Twilio phone calls, see ``adapter.py``), two
-call tools, a local dev-pipeline tool, and a ``pre_tool_call`` guard.
+call tools, the ``/voice-callback`` approval command, a local dev-pipeline tool,
+and a ``pre_tool_call`` guard.
 Nothing here imports Hermes internals, Pipecat or Twilio at load time.
 """
 from __future__ import annotations
@@ -11,13 +12,13 @@ import logging
 
 from ._env import secret
 from .hooks import on_pre_tool_call
-from .pipeline import start_local_pipeline
 from .schemas import (
     CHECK_STATUS_SCHEMA,
     LOCAL_PIPELINE_SCHEMA,
     PROPOSE_CALLBACK_SCHEMA,
 )
-from .tools import check_call_status, propose_callback
+from .callbacks import callback_command
+from .tools import check_call_status, propose_callback, start_local_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -69,24 +70,24 @@ def register(ctx):
         emoji="📞",
     )
     ctx.register_tool(
-        name="voice.propose_callback",
+        name="voice_propose_callback",
         toolset=TOOLSET,
         schema=PROPOSE_CALLBACK_SCHEMA,
         handler=propose_callback,
         description=(
-            "Propose a callback for operator approval before the gateway "
-            "dials out (destination + brief + requesting staff member)."
+            "Propose a phone callback. It is only recorded: a human operator must approve "
+            "it with /voice-callback before anything is dialed."
         ),
     )
     ctx.register_tool(
-        name="voice.check_call_status",
+        name="voice_check_call_status",
         toolset=TOOLSET,
         schema=CHECK_STATUS_SCHEMA,
         handler=check_call_status,
-        description="Read the status of a voice call from the provider (Twilio).",
+        description="Look up a call's status from Twilio, by call SID or callback id.",
     )
     ctx.register_tool(
-        name="voice.start_local_pipeline",
+        name="voice_start_local_pipeline",
         toolset=TOOLSET,
         schema=LOCAL_PIPELINE_SCHEMA,
         handler=start_local_pipeline,
@@ -96,6 +97,12 @@ def register(ctx):
             "(browser mic, no phone line)."
         ),
     )
+    ctx.register_command(
+        "voice-callback",
+        callback_command,
+        description="Review, approve or deny callbacks the agent proposed (nothing dials until approved).",
+        args_hint="list | show <id> | approve <id> | deny <id>",
+    )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
 
-    logger.info("hermes-voice-gateway registered (voice platform, 3 tools, 1 hook)")
+    logger.info("hermes-voice-gateway registered (voice platform, 3 tools, 1 command, 1 hook)")
