@@ -55,11 +55,13 @@ def test_register_wires_tools_and_hook() -> None:
     assert "voice.route_inbound" in names, names
     assert "voice.propose_callback" in names, names
     assert "voice.check_call_status" in names, names
+    assert "voice.start_local_pipeline" in names, names
 
     assert ctx.hooks == [("pre_tool_call", "on_pre_tool_call")], ctx.hooks
 
     # Sanity: the hook blocks voice tools when env is missing, allows others.
     assert mod.on_pre_tool_call(tool_name="voice.route_inbound") is not None
+    assert mod.on_pre_tool_call(tool_name="voice.start_local_pipeline") is not None
     assert mod.on_pre_tool_call(tool_name="files.read") is None
 
 

@@ -2,11 +2,11 @@ name: hermes-voice-gateway
 version: "0.1.0"
 manifest_version: 2
 api_version: 1
-description: "Pipecat-powered voice gateway that connects Hermes to business phone lines (Twilio Voice): answers inbound calls, proposes operator-approved callbacks, and reports call status."
+description: "Pipecat-powered voice gateway that connects Hermes to business phone lines (Twilio Voice): answers inbound calls, proposes operator-approved callbacks, and reports call status. Includes a local Pipecat pipeline with smallwebrtc transport for development before Twilio is connected."
 kind: standalone
 license: MIT
 homepage: https://github.com/shravanrai/hermes-voice-gateway
-tags: [voice, gateway, twilio, pipecat, callback]
+tags: [voice, gateway, twilio, pipecat, callback, smallwebrtc, local-audio]
 requires_env:
   - name: TWILIO_ACCOUNT_SID
     description: Twilio Account SID for the voice gateway
@@ -28,13 +28,15 @@ provides_tools:
   - voice.route_inbound
   - voice.propose_callback
   - voice.check_call_status
+  - voice.start_local_pipeline
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai>=0.5"
-  - "deepgram-sdk>=3"
-  - "twilio>=8"
-  - "python-dotenv>=1.0"
+  - "pipecat-ai>=0.5,<1.0"
+  - "deepgram-sdk>=3,<4"
+  - "twilio>=8,<9"
+  - "python-dotenv>=1.0,<2"
+  - "smallwebrtc>=0.1,<1.0"
 config_schema:
   voice_base_url:
     type: str

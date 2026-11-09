@@ -57,3 +57,15 @@ CHECK_STATUS_SCHEMA = {
     "required": ["call_sid"],
     "additionalProperties": False,
 }
+
+LOCAL_PIPELINE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "deepgram_api_key": {
+            "type": "string",
+            "description": "Deepgram API key for STT/TTS. Falls back to the DEEPGRAM_API_KEY env var if omitted.",
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}

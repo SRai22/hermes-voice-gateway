@@ -97,3 +97,15 @@ def check_call_status(call_sid: str = "", **kwargs) -> dict:
         "provider": "twilio",
         "note": "Provider status lookup not yet implemented (scaffold).",
     }
+
+
+async def start_local_pipeline(deepgram_api_key: str = "", **kwargs) -> dict:
+    """Start a Pipecat pipeline with smallwebrtc local audio transport.
+
+    Runs the voice pipeline locally (no Twilio) so audio can flow over the
+    web via WebRTC. Used for development and testing before connecting to
+    phone lines.
+    """
+    from .pipeline import start_local_pipeline as _run
+
+    return await _run(deepgram_api_key=deepgram_api_key)
