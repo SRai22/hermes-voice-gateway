@@ -27,13 +27,17 @@
 
 - Audit fixes: signaling server bound to 127.0.0.1 with Origin check and same-origin UI; keys read from env only; stub tools return ok:False; single running pipeline with cleanup; ICE candidates parsed and awaited on the pipeline loop; deps trimmed and extras added; tests rewritten for pytest
 
+- Twilio inbound calls (stage 1): plugin is now `kind: platform`. `adapter.py` answers calls (signature-checked webhook, allowlist, one-time stream token), runs a Pipecat pipeline (Twilio audio -> ElevenLabs realtime STT), hands transcripts to Hermes as messages, and speaks Hermes' replies with ElevenLabs TTS. `voice.route_inbound` removed (the adapter replaces it).
+- Secrets read through Hermes scoped secrets (`_env.secret`), falling back to os.environ only without Hermes
+
 ## In progress
-- Nothing yet
+- Waiting on a real call test (needs Hermes + Twilio + a public URL); see docs/checks.md
 
 ## Up next (one piece at a time)
-- Verify Twilio call signatures before answering
-- Save and show a proposed callback for human approval
-- Look up a call's status from the phone provider
+- Stage 2: `voice.check_call_status` (Twilio REST lookup)
+- Stage 2: `voice.propose_callback` (store pending in plugin storage, operator approval, then outbound dial); approval UX still undecided
+- Barge-in (caller interrupts Hermes mid-sentence) is not handled yet
+- Tool handlers still use the old keyword signature; Hermes documents `handler(args: dict, **kwargs) -> str` returning JSON
 
 ## Definition of done for each piece
 - Hermes validate and doctor both pass

@@ -1,47 +1,59 @@
 name: hermes-voice-gateway
-version: "0.1.0"
+version: "0.2.0"
 manifest_version: 2
 api_version: 1
-description: "Pipecat-powered voice gateway that connects Hermes to business phone lines (Twilio Voice): answers inbound calls, proposes operator-approved callbacks, and reports call status. Includes a local Pipecat pipeline with smallwebrtc transport for development before Twilio is connected."
-kind: standalone
+description: "Voice platform for Hermes: answers Twilio phone calls, speaks Hermes' replies with ElevenLabs, and (planned) places operator-approved callbacks. Includes a local WebRTC dev pipeline."
+kind: platform
 license: MIT
 homepage: https://github.com/shravanrai/hermes-voice-gateway
-tags: [voice, gateway, twilio, pipecat, callback, smallwebrtc, local-audio, elevenlabs, openai]
+tags: [voice, gateway, twilio, pipecat, phone, calls, elevenlabs]
 requires_env:
-  - name: ELEVENLABS_API_KEY
-    description: ElevenLabs API key for STT and TTS in the local Pipecat pipeline
-    secret: true
-  - name: OPENAI_API_KEY
-    description: OpenAI API key for the LLM in the local Pipecat pipeline
-    secret: true
-optional_env:
   - name: TWILIO_ACCOUNT_SID
-    description: Twilio Account SID (not used yet; phone tools are scaffolds)
-    secret: true
+    description: Twilio Account SID
+    password: true
   - name: TWILIO_AUTH_TOKEN
-    description: Twilio Auth Token (not used yet; phone tools are scaffolds)
-    secret: true
-  - name: TWILIO_NUMBER
-    description: Outbound caller ID / business phone number (E.164)
-    secret: false
-  - name: VOICE_BASE_URL
-    description: Public HTTPS endpoint Twilio webhooks/media streams can reach
-    secret: false
+    description: Twilio Auth Token (also used to verify webhook signatures)
+    password: true
+  - name: ELEVENLABS_API_KEY
+    description: ElevenLabs API key for speech-to-text and text-to-speech
+    password: true
+  - name: VOICE_WEBHOOK_URL
+    description: "Public https base URL Twilio can reach (no trailing slash). Set the number's voice webhook to <this>/voice"
+    password: false
+optional_env:
+  - name: VOICE_ALLOWED_USERS
+    description: Comma-separated caller numbers (E.164) allowed to talk to Hermes. Required unless VOICE_ALLOW_ALL_USERS=true
+    password: false
+  - name: VOICE_ALLOW_ALL_USERS
+    description: "true lets any caller in (not recommended)"
+    password: false
+  - name: VOICE_WEBHOOK_HOST
+    description: Local bind address for the call server (default 127.0.0.1)
+    password: false
+  - name: VOICE_WEBHOOK_PORT
+    description: Local port for the call server (default 8081)
+    password: false
+  - name: VOICE_MAX_CALLS
+    description: Maximum simultaneous calls (default 5)
+    password: false
+  - name: VOICE_INSECURE_NO_SIGNATURE
+    description: "true turns off Twilio signature checks. Local dev only"
+    password: false
+  - name: ELEVENLABS_VOICE_ID
+    description: ElevenLabs voice for replies
+    password: false
+  - name: OPENAI_API_KEY
+    description: Only for the local dev pipeline (voice.start_local_pipeline)
+    password: true
+  - name: TWILIO_PHONE_NUMBER
+    description: Outbound caller ID (E.164); used by the planned callback feature
+    password: false
 provides_tools:
-  - voice.route_inbound
   - voice.propose_callback
   - voice.check_call_status
   - voice.start_local_pipeline
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai[elevenlabs,openai,silero,webrtc]>=1.7.0,<1.8.0"
-config_schema:
-  voice_base_url:
-    type: str
-    default: ""
-    description: Public HTTPS endpoint for Twilio webhooks and media streams
-  twilio_number:
-    type: str
-    default: ""
-    description: Outbound caller ID (E.164) used for proposed callbacks
+  - "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.7.0,<1.8.0"
+  - "uvicorn>=0.32,<1"

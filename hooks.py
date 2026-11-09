@@ -1,16 +1,19 @@
 """Lifecycle hooks for the voice gateway.
 
-``on_pre_tool_call`` vetoes any voice tool call while the gateway's provider
-credentials are missing, so Hermes never half-executes a voice action.
+``on_pre_tool_call`` vetoes a voice tool call while the credentials that tool needs
+are missing, so Hermes never half-executes a voice action.
 """
 from __future__ import annotations
 
 import logging
-import os
 
-from .pipeline import REQUIRED_ENV
+from ._env import secret
+from .pipeline import REQUIRED_ENV as LOCAL_PIPELINE_ENV
 
 logger = logging.getLogger(__name__)
+
+TWILIO_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN")
+_NEEDS = {"voice.start_local_pipeline": LOCAL_PIPELINE_ENV}
 
 
 def on_pre_tool_call(tool_name: str = "", args=None, **kwargs):
@@ -23,16 +26,13 @@ def on_pre_tool_call(tool_name: str = "", args=None, **kwargs):
     if not str(tool_name).startswith("voice."):
         return None
 
-    missing = [v for v in REQUIRED_ENV if not os.environ.get(v)]
+    missing = [v for v in _NEEDS.get(tool_name, TWILIO_ENV) if not secret(v)]
     if missing:
         message = (
-            "hermes-voice-gateway: not configured — missing env "
+            "hermes-voice-gateway: not configured: missing env "
             + ", ".join(missing)
             + "; set them before calling " + tool_name
         )
         logger.warning("blocking %s: %s", tool_name, message)
         return {"action": "block", "message": message}
-
-    # TODO: when a voice tool carries a Twilio signature, verify it here and
-    # block on mismatch instead of passing the call through.
     return None

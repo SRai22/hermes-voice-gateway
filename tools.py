@@ -16,14 +16,6 @@ def _not_implemented(tool: str) -> dict:
     return {"ok": False, "error": f"{tool} is not implemented yet (scaffold); nothing was done."}
 
 
-def route_inbound(call_sid: str = "", **kwargs) -> dict:
-    """Answer an inbound call and bind its media stream to the Pipecat pipeline."""
-    # TODO: validate the Twilio signature, then bind the media stream URL to a
-    # Pipecat pipeline for call_sid.
-    logger.info("voice.route_inbound call_sid=%s", call_sid)
-    return _not_implemented("voice.route_inbound")
-
-
 def propose_callback(**kwargs) -> dict:
     """Propose a callback for operator approval before the gateway dials out."""
     # TODO: persist (destination, brief, staff_member) with status=pending and

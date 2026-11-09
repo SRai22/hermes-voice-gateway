@@ -6,26 +6,6 @@ the handler.
 """
 from __future__ import annotations
 
-ROUTE_INBOUND_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "call_sid": {
-            "type": "string",
-            "description": "Twilio Call SID of the inbound call to answer.",
-        },
-        "to": {
-            "type": "string",
-            "description": "Business number the caller reached (E.164).",
-        },
-        "from": {
-            "type": "string",
-            "description": "Caller's number (E.164).",
-        },
-    },
-    "required": ["call_sid"],
-    "additionalProperties": False,
-}
-
 PROPOSE_CALLBACK_SCHEMA = {
     "type": "object",
     "properties": {

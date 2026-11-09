@@ -26,9 +26,14 @@ import logging
 import os
 import uuid
 
+try:  # plugin package under Hermes
+    from ._env import secret
+except ImportError:  # imported top-level by the dev scripts
+    from _env import secret
+
 logger = logging.getLogger(__name__)
 
-# The one list of keys every voice tool needs (hooks.py imports it too).
+# Keys the local dev pipeline needs (hooks.py imports it for voice.start_local_pipeline).
 REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 SIGNALING_PORT = 8765
@@ -98,16 +103,16 @@ async def start_local_pipeline() -> dict:
     if _RUN_TASK is not None and not _RUN_TASK.done():
         return {**_RUN_INFO, "already_running": True}
 
-    elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    elevenlabs_key = secret("ELEVENLABS_API_KEY", "")
+    openai_key = secret("OPENAI_API_KEY", "")
 
     # Model names come from env with sensible defaults
-    stt_model = os.environ.get("ELEVENLABS_STT_MODEL", "scribe_v2")
-    tts_model = os.environ.get("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
-    llm_model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
-    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "")
+    stt_model = secret("ELEVENLABS_STT_MODEL", "scribe_v2")
+    tts_model = secret("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
+    llm_model = secret("OPENAI_MODEL", "gpt-5.6-luna")
+    voice_id = secret("ELEVENLABS_VOICE_ID", "")
 
-    missing = [v for v in REQUIRED_ENV if not os.environ.get(v)]
+    missing = [v for v in REQUIRED_ENV if not secret(v)]
     if missing:
         return {
             "ok": False,
