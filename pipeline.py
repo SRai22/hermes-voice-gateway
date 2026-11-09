@@ -240,9 +240,11 @@ async def start_local_pipeline() -> dict:
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
 
     # --- Build the pipeline ---
-    # Order matches Pipecat 1.x docs:
-    # transport.input() → STT → user context aggregator → LLM →
-    #   assistant context aggregator → TTS → transport.output()
+    # Order: transport.input() → VAD → STT → user context aggregator → LLM →
+    #   TTS → transport.output().
+    # NOTE: assistant_aggregator (from LLMContextAggregatorPair) swallows
+    # LLMTextFrame frames (buffers into context only, never pushes downstream),
+    # so it must NOT sit between LLM and TTS or TTS never receives text.
     pipeline = Pipeline(
         processors=[
             transport.input(),
@@ -250,7 +252,6 @@ async def start_local_pipeline() -> dict:
             stt,
             user_aggregator,
             llm,
-            assistant_aggregator,
             tts,
             transport.output(),
         ],
