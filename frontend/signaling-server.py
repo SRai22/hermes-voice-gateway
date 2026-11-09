@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Add the plugin directory to the path so we can import pipeline
@@ -42,6 +43,19 @@ PORT = pipeline.SIGNALING_PORT
 ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 MAX_BODY = 64 * 1024
 INDEX_FILE = os.path.join(PLUGIN_DIR, "frontend", "index.html")
+_OFFER_LOCKS: dict[str, asyncio.Lock] = {}
+_OFFER_LOCKS_LOCK = threading.Lock()
+
+
+def _offer_lock(connection_id: str) -> asyncio.Lock:
+    with _OFFER_LOCKS_LOCK:
+        return _OFFER_LOCKS.setdefault(connection_id, asyncio.Lock())
+
+
+async def _initialize_offer(conn, connection_id: str, sdp: str, sdp_type: str):
+    async with _offer_lock(connection_id):
+        await conn.initialize(sdp, sdp_type)
+        return conn.get_answer()
 
 
 class SignalingHandler(BaseHTTPRequestHandler):
@@ -146,14 +160,11 @@ class SignalingHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Schedule connection.initialize(sdp, "offer") on the pipeline's loop
+            # Keep each initialize/answer pair together; ICE requests use no offer lock.
             future = asyncio.run_coroutine_threadsafe(
-                conn.initialize(sdp, sdp_type), loop
+                _initialize_offer(conn, cid, sdp, sdp_type), loop
             )
-            future.result(timeout=15)  # wait for initialize to complete
-
-            # get_answer returns a dict: {"sdp": str, "type": str, "pc_id": str}
-            answer = conn.get_answer()
+            answer = future.result(timeout=15)
             if answer is None:
                 self._send_json(500, {"error": "no answer available"})
                 return

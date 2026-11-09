@@ -1,6 +1,8 @@
 """Signaling server: origin check, input limits, unknown connection."""
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import importlib.util
 import json
@@ -61,3 +63,51 @@ def test_index_is_served(server) -> None:
     _, port = server
     status, data = _request(port, "GET", "/")
     assert status == 200 and b"<html" in data.lower()
+
+
+def test_concurrent_offers_for_one_connection_are_serialized(server, monkeypatch) -> None:
+    mod, _ = server
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+
+    class Connection:
+        answer = None
+
+        async def initialize(self, sdp, sdp_type):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            self.answer = {"sdp": sdp, "type": "answer"}
+            with state_lock:
+                active -= 1
+
+        def get_answer(self):
+            return self.answer
+
+    connection = Connection()
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever)
+    loop_thread.start()
+    monkeypatch.setattr(mod.pipeline, "ACTIVE_CONNECTIONS", {"shared": connection})
+    monkeypatch.setattr(mod.pipeline, "_ACTIVE_LOOP", loop)
+
+    def offer(sdp):
+        response = []
+        handler = mod.SignalingHandler.__new__(mod.SignalingHandler)
+        handler._send_json = lambda code, body: response.append((code, body))
+        handler._handle_offer({"connectionId": "shared", "sdp": sdp})
+        return response[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(offer, ("offer-1", "offer-2")))
+        assert [response[0] for response in responses] == [200, 200]
+        assert {response[1]["sdp"] for response in responses} == {"offer-1", "offer-2"}
+        assert max_active == 1
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join()
+        loop.close()
