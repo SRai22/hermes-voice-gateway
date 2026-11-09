@@ -5,9 +5,9 @@ Sets up a complete Pipecat voice pipeline running locally over WebRTC
 Twilio phone lines.
 
 Pipeline flow:
-  WebRTC audio in → VAD turn detection → Deepgram STT → LLM → TTS → WebRTC audio out
+  WebRTC audio in → VAD turn detection → ElevenLabs STT → OpenAI LLM → ElevenLabs TTS → WebRTC audio out
 
-All Pipecat / smallwebrtc / Deepgram / OpenAI imports live inside the
+All Pipecat / smallwebrtc / ElevenLabs / OpenAI imports live inside the
 ``start_local_pipeline`` function, never at module load. The plugin registers
 and loads cleanly even when none of those packages are installed.
 """
@@ -19,25 +19,16 @@ import os
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_ENV = ("DEEPGRAM_API_KEY",)
+REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 
 def _missing_env() -> list[str]:
     return [v for v in REQUIRED_ENV if not os.environ.get(v)]
 
 
-class _EchoLLM:
-    """A minimal stand-in LLM that echoes the user's message back.
-
-    Used when no OpenAI API key is available, so the pipeline can still run
-    end-to-end for local audio testing.
-    """
-
-    async def __call__(self, text: str) -> str:
-        return f"You said: {text}"
-
-
-async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
+async def start_local_pipeline(
+    elevenlabs_api_key: str = "", openai_api_key: str = ""
+) -> dict:
     """Start a Pipecat pipeline with smallwebrtc local audio transport.
 
     Returns ``{"ok": True, ...}`` with connection info when the pipeline
@@ -47,32 +38,36 @@ async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
     The pipeline runs as a background asyncio task after this call returns,
     waiting for a WebRTC client to connect to the smallwebrtc transport.
     """
-    api_key = deepgram_api_key or os.environ.get("DEEPGRAM_API_KEY", "")
-    if not api_key:
-        return {
-            "ok": False,
-            "error": (
-                "DEEPGRAM_API_KEY is required for the local Pipecat pipeline. "
-                "Set it in your environment or pass it to the tool."
-            ),
-        }
+    elevenlabs_key = elevenlabs_api_key or os.environ.get("ELEVENLABS_API_KEY", "")
+    openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
 
-    missing = _missing_env()
+    missing = []
+    if not elevenlabs_key:
+        missing.append("ELEVENLABS_API_KEY")
+    if not openai_key:
+        missing.append("OPENAI_API_KEY")
     if missing:
         return {
             "ok": False,
-            "error": "Missing env: " + ", ".join(missing),
+            "error": (
+                "Missing required keys: "
+                + ", ".join(missing)
+                + ". Set them in your environment or pass them to the tool."
+            ),
         }
 
     try:
         # --- Pipecat / smallwebrtc imports (only at call time) ---
+        import aiohttp
+
         from pipecat.transports.smallwebrtc.connection import (
             SmallWebRTCConnection,
         )
         from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
         from pipecat.transports.base_transport import TransportParams
-        from pipecat.services.deepgram.stt import DeepgramSTTService
-        from pipecat.services.deepgram.tts import DeepgramTTSService
+        from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+        from pipecat.services.openai.llm import OpenAILLMService
         from pipecat.turns.user_turn_processor import UserTurnProcessor
         from pipecat.turns.user_start import VADUserTurnStartStrategy
         from pipecat.pipeline.pipeline import Pipeline
@@ -92,23 +87,13 @@ async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
             "error": (
                 "Pipecat or smallwebrtc not installed: "
                 + str(exc)
-                + ". Install pipecat-ai[webrtc,deepgram] to use the local "
+                + ". Install pipecat-ai[webrtc,elevenlabs] to use the local "
                 "pipeline."
             ),
         }
 
-    # --- OpenAI LLM (optional; falls back to echo) ---
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    llm = None
-    llm_name = "echo"
-    if openai_key:
-        try:
-            from pipecat.services.openai.llm import OpenAILLMService
-
-            llm = OpenAILLMService(model="gpt-4o-mini", api_key=openai_key)
-            llm_name = "openai:gpt-4o-mini"
-        except ImportError:
-            logger.warning("OpenAILLMService unavailable; falling back to echo LLM")
+    # --- OpenAI LLM (actual LLM path, no echo fallback) ---
+    llm = OpenAILLMService(model="gpt-4o-mini", api_key=openai_key)
 
     # --- WebRTC connection + transport ---
     connection = SmallWebRTCConnection()
@@ -123,11 +108,15 @@ async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
         output_name="speaker_output",
     )
 
-    # --- Speech-to-text (Deepgram) ---
-    stt = DeepgramSTTService(api_key=api_key)
+    # --- Speech-to-text (ElevenLabs) ---
+    # ElevenLabsSTTService requires an aiohttp session. We create one here;
+    # it lives for the lifetime of the pipeline (no explicit cleanup for a
+    # short-lived local dev pipeline).
+    session = aiohttp.ClientSession()
+    stt = ElevenLabsSTTService(api_key=elevenlabs_key, aiohttp_session=session)
 
-    # --- Text-to-speech (Deepgram) ---
-    tts = DeepgramTTSService(api_key=api_key)
+    # --- Text-to-speech (ElevenLabs) ---
+    tts = ElevenLabsTTSService(api_key=elevenlabs_key)
 
     # --- Turn detection (VAD-based) ---
     turn_processor = UserTurnProcessor(
@@ -152,7 +141,7 @@ async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
             transport.input(),
             turn_processor,
             stt,
-            llm if llm is not None else _EchoLLM(),
+            llm,
             response_aggregator,
             tts,
             transport.output(),
@@ -180,16 +169,15 @@ async def start_local_pipeline(deepgram_api_key: str = "") -> dict:
     loop.create_task(runner.run(task))
 
     logger.info(
-        "start_local_pipeline: pipeline started (llm=%s, stt=deepgram, tts=deepgram, transport=smallwebrtc)",
-        llm_name,
+        "start_local_pipeline: pipeline started (llm=openai:gpt-4o-mini, stt=elevenlabs, tts=elevenlabs, transport=smallwebrtc)"
     )
 
     return {
         "ok": True,
         "transport": "smallwebrtc",
-        "stt": "deepgram",
-        "llm": llm_name,
-        "tts": "deepgram",
+        "stt": "elevenlabs",
+        "llm": "openai:gpt-4o-mini",
+        "tts": "elevenlabs",
         "note": (
             "Pipeline started and running in the background. Waiting for a "
             "WebRTC client to connect to the smallwebrtc transport."

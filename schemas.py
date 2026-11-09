@@ -61,11 +61,15 @@ CHECK_STATUS_SCHEMA = {
 LOCAL_PIPELINE_SCHEMA = {
     "type": "object",
     "properties": {
-        "deepgram_api_key": {
+        "elevenlabs_api_key": {
             "type": "string",
-            "description": "Deepgram API key for STT/TTS. Falls back to the DEEPGRAM_API_KEY env var if omitted.",
+            "description": "ElevenLabs API key for STT/TTS. Falls back to the ELEVENLABS_API_KEY env var if omitted.",
+        },
+        "openai_api_key": {
+            "type": "string",
+            "description": "OpenAI API key for the LLM. Falls back to the OPENAI_API_KEY env var if omitted.",
         },
     },
-    "required": [],
+    "required": ["elevenlabs_api_key", "openai_api_key"],
     "additionalProperties": False,
 }

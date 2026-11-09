@@ -10,7 +10,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "DEEPGRAM_API_KEY")
+REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 
 def on_pre_tool_call(tool_name: str = "", args=None, **kwargs):

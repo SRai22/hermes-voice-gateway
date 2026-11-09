@@ -1,6 +1,6 @@
 """Voice tool handlers.
 
-Providers (Twilio / Deepgram / Pipecat) are only imported inside the
+Providers (Twilio / ElevenLabs / OpenAI / Pipecat) are only imported inside the
 handlers, at call time, so the plugin loads and registers even when none of
 them are installed. Unconfigured providers degrade to a clear ``ok: False``
 result instead of crashing the turn.
@@ -12,7 +12,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "DEEPGRAM_API_KEY")
+REQUIRED_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 
 def _missing_env() -> list[str]:
@@ -28,7 +28,7 @@ def route_inbound(call_sid: str = "", to: str = "", from_: str = "", **kwargs) -
             "error": (
                 "voice gateway not configured: missing env "
                 + ", ".join(missing)
-                + ". Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, DEEPGRAM_API_KEY."
+                + ". Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, ELEVENLABS_API_KEY."
             ),
         }
     # TODO: validate the Twilio signature, then bind the media stream URL to a
@@ -99,13 +99,17 @@ def check_call_status(call_sid: str = "", **kwargs) -> dict:
     }
 
 
-async def start_local_pipeline(deepgram_api_key: str = "", **kwargs) -> dict:
+async def start_local_pipeline(
+    elevenlabs_api_key: str = "", openai_api_key: str = "", **kwargs
+) -> dict:
     """Start a Pipecat pipeline with smallwebrtc local audio transport.
 
     Runs the voice pipeline locally (no Twilio) so audio can flow over the
     web via WebRTC. Used for development and testing before connecting to
-    phone lines.
+    phone lines. Uses ElevenLabs for STT/TTS and OpenAI for the LLM.
     """
     from .pipeline import start_local_pipeline as _run
 
-    return await _run(deepgram_api_key=deepgram_api_key)
+    return await _run(
+        elevenlabs_api_key=elevenlabs_api_key, openai_api_key=openai_api_key
+    )
