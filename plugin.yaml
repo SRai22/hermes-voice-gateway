@@ -1,0 +1,46 @@
+name: hermes-voice-gateway
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+description: "Pipecat-powered voice gateway that connects Hermes to business phone lines (Twilio Voice): answers inbound calls, proposes operator-approved callbacks, and reports call status."
+kind: standalone
+license: MIT
+homepage: https://github.com/shravanrai/hermes-voice-gateway
+tags: [voice, gateway, twilio, pipecat, callback]
+requires_env:
+  - name: TWILIO_ACCOUNT_SID
+    description: Twilio Account SID for the voice gateway
+    secret: true
+  - name: TWILIO_AUTH_TOKEN
+    description: Twilio Auth Token
+    secret: true
+  - name: DEEPGRAM_API_KEY
+    description: Deepgram API key for STT/TTS in the Pipecat pipeline
+    secret: true
+optional_env:
+  - name: TWILIO_NUMBER
+    description: Outbound caller ID / business phone number (E.164)
+    secret: false
+  - name: VOICE_BASE_URL
+    description: Public HTTPS endpoint Twilio webhooks/media streams can reach
+    secret: false
+provides_tools:
+  - voice.route_inbound
+  - voice.propose_callback
+  - voice.check_call_status
+provides_hooks:
+  - pre_tool_call
+python_dependencies:
+  - "pipecat-ai>=0.5"
+  - "deepgram-sdk>=3"
+  - "twilio>=8"
+  - "python-dotenv>=1.0"
+config_schema:
+  voice_base_url:
+    type: str
+    default: ""
+    description: Public HTTPS endpoint for Twilio webhooks and media streams
+  twilio_number:
+    type: str
+    default: ""
+    description: Outbound caller ID (E.164) used for proposed callbacks
