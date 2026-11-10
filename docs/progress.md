@@ -35,14 +35,22 @@
 
 - Call behaviour, local pipeline only (`voice_behavior.py` + `pipeline.py`): greeting on connect (`VOICE_GREETING`), voice profile file (`VOICE_PROFILE_PATH`, default `<HERMES_HOME>/voice/PROFILE.md`), explicit smart-turn end-of-speech (LocalSmartTurnAnalyzerV3), guardrails (empty-turn "say again", idle prompt then hang-up, 3 pipeline errors then goodbye). Assistant aggregator moved after `transport.output()` so the context records what was spoken. Verified with pipecat 1.15.0 in a scratch venv: 79 tests pass on both versions.
 
+## Current verification
+- Pipecat is pinned to exactly 1.7.0 in the repository and installed-plugin dependency declarations and install hints. The dedicated local/test environment and current Hermes-managed runtime both import 1.7.0. Historical 1.15.0 results above are not the version policy.
+- Local audio and shutdown checks passed on 1.7.0: greeting, real transcription/LLM reply/audio, custom voice profile, idle prompt and goodbye; both normal completion and leaving during goodbye release the active connection. Added regression coverage for cancellation behind a draining EndFrame and the WebRTC `closed` event.
+- Ported call behaviour into `adapter.py`: stable per-call `MessageEvent.channel_prompt`, configurable inbound greeting, smart-turn aggregation, assistant aggregation after output, empty/error/idle guards, processing/playback-aware idle suppression, and urgent disconnect cleanup. Outbound callbacks remain Hermes-first.
+- Full suite: 96 passed with 35 upstream deprecation warnings. Plugin validate, doctor (three tools, one hook), and `git diff --check` passed.
+- Local Twilio-format WebSocket test used real ElevenLabs STT/TTS and a simulated Hermes processing/reply lifecycle. One completed transcript was relayed, audio returned, thinking longer than the idle timeout did not count as caller silence, two idle events ended the call, and the call registry emptied. This is not a real Twilio/Hermes end-to-end test.
+- The installed plugin's independent local modifications were preserved; only its version declarations/install hints were aligned. New behaviour has not been deployed there, and the running gateway was not restarted.
+
 ## In progress
 - Waiting on a real call test (needs Hermes + Twilio + a public URL); see docs/checks.md
 
 ## Up next (one piece at a time)
-- Port greeting, profile, smart turn and guardrails into the Twilio adapter. Differences: Hermes is the LLM there, so the profile must reach Hermes (ephemeral/channel prompt), the adapter has no user aggregator yet (smart turn needs one, or a turn-stop strategy on the relay), and idle detection must not fire while Hermes is still thinking
-- Pipecat stays pinned to 1.7.x. Call behaviour verified on both 1.7.0 and 1.15.0 (79 tests each). The empty-turn guardrail uses `on_user_turn_stopped` (EmptyUserTurnConfig is 1.15-only)
+- Deploy the tested adapter deliberately after reconciling the installed plugin's existing changes, then test a real inbound call and an approved callback through Hermes.
+- Pipecat stays pinned to exactly 1.7.0. The empty-turn guardrail uses `on_user_turn_stopped` (EmptyUserTurnConfig is 1.15-only); live noise-only recognition remains unverified.
 - Answering-machine detection for callbacks; Twilio status callbacks to update stored status
-- Barge-in (caller interrupts Hermes mid-sentence) is not handled yet
+- Full barge-in, including cancellation of Hermes reasoning/tools, remains unverified
 
 ## Definition of done for each piece
 - Hermes validate and doctor both pass

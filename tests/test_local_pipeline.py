@@ -55,6 +55,61 @@ def test_disconnect_cancels_pipeline_and_waits_for_cleanup(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_disconnect_unblocks_an_end_frame_already_draining(monkeypatch) -> None:
+    """A peer may leave before the goodbye finishes playing."""
+    pytest.importorskip("pipecat")
+    from pipecat.frames.frames import CancelFrame, EndFrame
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.worker import PipelineWorker
+    from pipecat.processors.frame_processor import FrameProcessor
+    from pipecat.workers.runner import WorkerRunner
+
+    async def scenario() -> None:
+        draining = asyncio.Event()
+
+        class DisconnectedOutput(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, EndFrame):
+                    draining.set()  # Playback cannot finish after the peer leaves.
+                    return
+                await self.push_frame(frame, direction)
+
+        class Session:
+            closed = False
+
+            async def close(self):
+                self.closed = True
+
+        worker = PipelineWorker(Pipeline([DisconnectedOutput()]), enable_rtvi=False)
+        runner = WorkerRunner(handle_sigint=False, handle_sigterm=False)
+        session = Session()
+        connection_id = "draining-connection"
+        monkeypatch.setattr(pipeline_module, "ACTIVE_CONNECTIONS", {connection_id: object()})
+        monkeypatch.setattr(pipeline_module, "_RUN_INFO", {"connection_id": connection_id})
+        run_task = asyncio.create_task(
+            pipeline_module._run_pipeline(runner, worker, session, connection_id)
+        )
+        monkeypatch.setattr(pipeline_module, "_RUN_TASK", run_task)
+        await worker.queue_frame(EndFrame())
+        await asyncio.wait_for(draining.wait(), 2)
+        stopping = asyncio.create_task(pipeline_module._stop_pipeline_on_disconnect(connection_id))
+        try:
+            done, _ = await asyncio.wait({stopping}, timeout=1)
+            assert done, "disconnect is stuck behind the draining EndFrame"
+            await stopping
+            assert run_task.done()
+            assert session.closed
+            assert connection_id not in pipeline_module.ACTIVE_CONNECTIONS
+        finally:
+            # Rescue the old implementation without leaving pytest hung on teardown.
+            if not run_task.done():
+                await worker.pipeline.queue_frame(CancelFrame())
+            await asyncio.wait_for(asyncio.gather(run_task, stopping, return_exceptions=True), 3)
+
+    asyncio.run(scenario())
+
+
 def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tmp_path) -> None:
     """Needs pipecat installed. Builds the real pipeline (no network) and fires its handlers."""
     pytest.importorskip("pipecat")
@@ -110,6 +165,18 @@ def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tm
         assert procs["OpenAILLMService"]._settings.system_instruction == "Speak like a pirate."
         stop = procs["LLMUserAggregator"]._user_turn_controller._user_turn_strategies.stop
         assert [type(s).__name__ for s in stop] == ["TurnAnalyzerUserTurnStopStrategy"]
+
+        # A normal WebRTC peer close emits "closed", not "disconnected".
+        disconnected = []
+
+        async def record_disconnect(connection_id):
+            disconnected.append(connection_id)
+
+        monkeypatch.setattr(pipeline_module, "_stop_pipeline_on_disconnect", record_disconnect)
+        connection = built["transport"]._client._webrtc_connection
+        await connection._call_event_handler("closed")
+        await asyncio.sleep(0.05)
+        assert disconnected == [pipeline_module._RUN_INFO["connection_id"]]
 
         # greeting on connect
         await built["transport"]._call_event_handler("on_client_connected", None)

@@ -6,7 +6,7 @@ Call flow:
      Media Stream to ``/media``. The TwiML carries a one-time token.
   2. Twilio opens the ``/media`` WebSocket. We redeem the token, then run a Pipecat
      pipeline: Twilio audio -> VAD-segmented ElevenLabs Scribe v2 STT -> transcript relay.
-  3. Each final transcript is handed to Hermes as a normal ``MessageEvent``
+  3. Each smart-turn-final transcript is handed to Hermes as a normal ``MessageEvent``
      (chat_id = the caller's number), so the Hermes agent, its tools and its memory
      handle the call.
   4. Hermes' reply arrives in ``send()``. We queue it as speech (ElevenLabs TTS) on
@@ -29,6 +29,7 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 
 from ._env import secret
+from . import voice_behavior as vb
 from .callbacks import ID_RE, clean_text, open_store
 from .twilio_util import (
     StreamTokens,
@@ -48,6 +49,7 @@ DEFAULT_PORT = 8081
 DEFAULT_MAX_CALLS = 5
 DEFAULT_MAX_CALL_SECONDS = 1800  # Pipecat idle detection does not cap call length
 SAMPLE_RATE = 8000  # Twilio Media Streams are 8 kHz mu-law
+IDLE_SECONDS = 15
 _SERVER_START_TIMEOUT = 10.0
 
 
@@ -59,6 +61,14 @@ class _Call:
     websocket: Any = None  # closed on shutdown if the pipeline is not built yet
     opening: str = ""  # first message to Hermes when the callee answers an outbound callback
     turns: int = field(default=0)
+    profile: str = field(default_factory=vb.load_profile)
+    guard: vb.CallGuard = field(default_factory=vb.CallGuard)
+    pending_events: set[str] = field(default_factory=set)
+    queued_speech: int = 0
+    bot_speaking: bool = False
+    idle_enabled: bool = True
+    user_aggregator: Any = None
+    ending: bool = False
 
 
 class VoiceAdapter(BasePlatformAdapter):
@@ -151,15 +161,60 @@ class VoiceAdapter(BasePlatformAdapter):
         call = self._calls.get(chat_id)
         if call is None or call.task is None:
             return SendResult(success=False, error="no active call for this number")
-        if call.task.has_finished():  # caller hung up; the call is being cleaned up
+        if call.ending or call.task.has_finished():  # caller hung up or goodbye is draining
             return SendResult(success=False, error="call already ended")
         text = self.prepare_tts_text(content)
         if not text:
             return SendResult(success=True)
+        await self._say(call, text)
+        return SendResult(success=True, message_id=f"{call.call_sid}-reply-{call.turns}")
+
+    @staticmethod
+    def _busy(call: _Call) -> bool:
+        return bool(call.pending_events or call.queued_speech or call.bot_speaking or call.ending)
+
+    async def _sync_idle(self, call: _Call) -> None:
+        if call.task is None or call.user_aggregator is None:
+            return
+        enabled = not self._busy(call)
+        if enabled != call.idle_enabled:
+            from pipecat.frames.frames import BotStoppedSpeakingFrame, UserIdleTimeoutUpdateFrame
+
+            call.idle_enabled = enabled
+            if enabled:
+                # A cancelled/silent Hermes result has no playback stop of its
+                # own. Open the wait window only after ALL work/audio settles.
+                await call.task.queue_frame(BotStoppedSpeakingFrame())
+            await call.task.queue_frame(UserIdleTimeoutUpdateFrame(timeout=IDLE_SECONDS if enabled else 0))
+
+    async def _say(self, call: _Call, text: str, hang_up: bool = False) -> None:
+        if call.task is None or call.ending:
+            return
         from pipecat.frames.frames import TTSSpeakFrame
 
+        call.queued_speech += 1
+        call.ending = hang_up
+        await self._sync_idle(call)
         await call.task.queue_frame(TTSSpeakFrame(text))
-        return SendResult(success=True, message_id=f"{call.call_sid}-reply-{call.turns}")
+        if hang_up:
+            from pipecat.frames.frames import EndFrame
+
+            await call.task.queue_frame(EndFrame())
+
+    def _event_call(self, event) -> Optional[_Call]:
+        call = self._calls.get(event.source.chat_id)
+        return call if call and event.message_id in call.pending_events else None
+
+    async def on_processing_start(self, event) -> None:
+        if call := self._event_call(event):
+            await self._sync_idle(call)
+
+    async def on_processing_complete(self, event, outcome) -> None:
+        if call := self._event_call(event):
+            call.pending_events.discard(event.message_id)
+            if getattr(outcome, "value", outcome) == "failure":
+                await self._say(call, *call.guard.on_error())
+            await self._sync_idle(call)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
@@ -298,15 +353,22 @@ class VoiceAdapter(BasePlatformAdapter):
             logger.info("[voice] call from %s ended", redact_phone(call.caller))
 
     async def _end_call(self, call: _Call) -> None:
+        call.ending = True
         if call.task is not None:
-            await call.task.cancel()
+            from pipecat.frames.frames import CancelFrame
+
+            # worker.cancel() can queue behind an EndFrame draining a dead peer.
+            await call.task.pipeline.queue_frame(CancelFrame())
         elif call.websocket is not None:  # still building the pipeline
             await call.websocket.close()
 
     # -- Per-call pipeline ---------------------------------------------------
 
     async def _run_call(self, websocket, call: _Call, stream_sid: str) -> None:
-        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.frames.frames import (
+            LLMContextFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSStoppedFrame,
+            InterruptionFrame,
+        )
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
         from pipecat.processors.frame_processor import FrameProcessor
@@ -314,6 +376,13 @@ class VoiceAdapter(BasePlatformAdapter):
         import aiohttp
         from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.processors.audio.vad_processor import VADProcessor
+        from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import (
+            LLMContextAggregatorPair, LLMUserAggregatorParams,
+        )
+        from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+        from pipecat.turns.user_turn_strategies import UserTurnStrategies
         from pipecat.services.elevenlabs.stt import (
             ElevenLabsSTTService,
             ElevenLabsSTTSettings,
@@ -327,15 +396,33 @@ class VoiceAdapter(BasePlatformAdapter):
 
         adapter = self
 
-        class TranscriptRelay(FrameProcessor):
-            """Hands each final transcript to Hermes; keeps text out of the TTS path."""
+        class ContextSink(FrameProcessor):
+            """Hermes owns inference; discard context, not control/playback frames."""
 
             async def process_frame(self, frame, direction):
                 await super().process_frame(frame, direction)
-                if isinstance(frame, TranscriptionFrame):
-                    if frame.text.strip():
-                        adapter._relay_to_hermes(call, frame.text.strip())
+                if isinstance(frame, LLMContextFrame):
                     return
+                if isinstance(frame, BotStartedSpeakingFrame):
+                    call.bot_speaking = True
+                    await adapter._sync_idle(call)
+                elif isinstance(frame, BotStoppedSpeakingFrame):
+                    call.bot_speaking = False
+                    await adapter._sync_idle(call)
+                elif isinstance(frame, InterruptionFrame):
+                    call.queued_speech = 0
+                    call.bot_speaking = False
+                    await adapter._sync_idle(call)
+                await self.push_frame(frame, direction)
+
+        class PlaybackTracker(FrameProcessor):
+            """Count utterance completions only after transport playback drains."""
+
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, TTSStoppedFrame):
+                    call.queued_speech = max(0, call.queued_speech - 1)
+                    await adapter._sync_idle(call)
                 await self.push_frame(frame, direction)
 
         transport = FastAPIWebsocketTransport(
@@ -368,7 +455,20 @@ class VoiceAdapter(BasePlatformAdapter):
                 api_key=self._elevenlabs_key,
                 settings=ElevenLabsTTSSettings(**tts_settings),
             )
-            pipeline = Pipeline([transport.input(), vad, stt, TranscriptRelay(), tts, transport.output()])
+            user, assistant = LLMContextAggregatorPair(
+                LLMContext(),
+                user_params=LLMUserAggregatorParams(
+                    user_turn_strategies=UserTurnStrategies(stop=[
+                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
+                    ]),
+                    user_idle_timeout=IDLE_SECONDS,
+                ),
+            )
+            call.user_aggregator = user
+            pipeline = Pipeline([
+                transport.input(), vad, stt, user, ContextSink(), tts, transport.output(),
+                PlaybackTracker(), assistant,
+            ])
             task = PipelineWorker(
                 pipeline,
                 params=PipelineParams(audio_in_sample_rate=SAMPLE_RATE, audio_out_sample_rate=SAMPLE_RATE),
@@ -379,30 +479,58 @@ class VoiceAdapter(BasePlatformAdapter):
             async def _on_connect(_transport, _client):
                 if call.opening:  # outbound callback: Hermes speaks first
                     self._relay_to_hermes(call, call.opening)
+                elif opening := vb.greeting():
+                    await self._say(call, opening)
+                else:
+                    # No opening audio means no transport BotStopped frame to
+                    # open Pipecat's initial waiting-for-user window.
+                    await task.queue_frame(BotStoppedSpeakingFrame())
+
+            @task.event_handler("on_pipeline_error")
+            async def _on_error(_task, _frame):
+                logger.warning("[voice] pipeline error for %s", redact_phone(call.caller))
+                call.queued_speech = 0  # failed synthesis may never emit a stop frame
+                await self._say(call, *call.guard.on_error())
+
+            @user.event_handler("on_user_turn_idle")
+            async def _on_idle(_user):
+                if not self._busy(call):  # also reject an already-dispatched idle event
+                    await self._say(call, *call.guard.on_idle())
+
+            @user.event_handler("on_user_turn_stopped")
+            async def _on_turn(_user, _strategy, message):
+                fallback = call.guard.on_turn(message.content)
+                if fallback:
+                    await self._say(call, fallback)
+                elif message.content and message.content.strip():
+                    self._relay_to_hermes(call, message.content)
 
             @transport.event_handler("on_client_disconnected")
             async def _on_disconnect(_transport, _client):
-                await task.cancel()
+                await self._end_call(call)
 
             runner = WorkerRunner(handle_sigint=False)
             await runner.add_workers(task)
             limiter = None
             if self._max_call_seconds > 0:
-                limiter = asyncio.create_task(self._enforce_max_duration(task))
+                limiter = asyncio.create_task(self._enforce_max_duration(call))
+            runner_task = asyncio.create_task(runner.run())
             try:
-                await runner.run()
+                await asyncio.shield(runner_task)
+            except asyncio.CancelledError:
+                await self._end_call(call)
+                await runner_task
+                raise
             finally:
                 if limiter is not None:
                     limiter.cancel()
+                    await asyncio.gather(limiter, return_exceptions=True)
 
-    async def _enforce_max_duration(self, task) -> None:
+    async def _enforce_max_duration(self, call: _Call) -> None:
         """Say goodbye and end the call after VOICE_MAX_CALL_SECONDS (Pipecat docs: not automatic)."""
-        from pipecat.frames.frames import EndFrame, TTSSpeakFrame
-
         await asyncio.sleep(self._max_call_seconds)
         logger.info("[voice] call reached the %ds limit; ending it", self._max_call_seconds)
-        await task.queue_frame(TTSSpeakFrame("We have reached the time limit for this call. Goodbye."))
-        await task.queue_frame(EndFrame())
+        await self._say(call, "We have reached the time limit for this call. Goodbye.", hang_up=True)
 
     def _relay_to_hermes(self, call: _Call, text: str) -> None:
         """Turn one final transcript into a Hermes message (non-blocking)."""
@@ -412,13 +540,38 @@ class VoiceAdapter(BasePlatformAdapter):
             chat_id=call.caller, chat_name=call.caller, chat_type="dm",
             user_id=call.caller, user_name=call.caller,
         )
+        event_id = f"{call.call_sid}-{call.turns}"
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,  # TEXT, not VOICE: send() speaks the reply itself
             source=source,
-            message_id=f"{call.call_sid}-{call.turns}",
+            message_id=event_id,
             allow_gateway_control=False,  # a spoken phrase must never run /commands
+            channel_prompt=call.profile,
         )
-        task = asyncio.create_task(self.handle_message(event))
+        call.pending_events.add(event_id)
+
+        async def admit():
+            await self._sync_idle(call)
+            try:
+                await self.handle_message(event)
+            except asyncio.CancelledError:
+                call.pending_events.discard(event.message_id)
+                await self._sync_idle(call)
+                raise
+            except Exception:
+                logger.warning("[voice] relay failed for %s", redact_phone(call.caller))
+                call.pending_events.discard(event.message_id)
+                await self._say(call, *call.guard.on_error())
+                await self._sync_idle(call)
+            else:
+                # handle_message returns after admission, not final delivery.
+                # Explicit rejection is the only successful return that clears busy.
+                if getattr(event, "_gateway_accepted", None) is False:
+                    call.pending_events.discard(event.message_id)
+                    await self._say(call, *call.guard.on_error())
+                    await self._sync_idle(call)
+
+        task = asyncio.create_task(admit())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)

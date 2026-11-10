@@ -59,7 +59,7 @@ def register(ctx):
         adapter_factory=_make_adapter,
         check_fn=_check_requirements,
         required_env=list(PLATFORM_ENV),
-        install_hint="pip install 'pipecat-ai[elevenlabs,websocket]' uvicorn",
+        install_hint="pip install 'pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]==1.7.0' uvicorn",
         env_enablement_fn=_env_enablement,
         allowed_users_env="VOICE_ALLOWED_USERS",
         allow_all_env="VOICE_ALLOW_ALL_USERS",

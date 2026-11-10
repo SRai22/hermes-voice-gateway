@@ -152,6 +152,9 @@ def test_send_speaks_on_the_callers_live_pipeline(make, monkeypatch) -> None:
     result = asyncio.run(adapter.send(CALLER, "  Hi there  "))
     assert result.success and queued == [("speak", "Hi there")]
     assert asyncio.run(adapter.send("+19990000000", "x")).success is False
+    adapter._calls[CALLER].ending = True
+    assert asyncio.run(adapter.send(CALLER, "after goodbye")).success is False
+    adapter._calls[CALLER].ending = False
     adapter._calls[CALLER].task.finished = True  # caller hung up
     assert asyncio.run(adapter.send(CALLER, "too late")).success is False
     assert queued == [("speak", "Hi there")]
@@ -172,6 +175,27 @@ def test_transcript_becomes_a_hermes_text_message(make) -> None:
     assert event.source.chat_id == CALLER
     assert event.message_id == "CA1-1"
     assert event.allow_gateway_control is False  # spoken words must not run /commands
+
+
+def test_call_profile_is_snapshotted_and_sent_without_changing_transcript(make, monkeypatch, tmp_path):
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text("Speak as the appointment receptionist.")
+    monkeypatch.setenv("VOICE_PROFILE_PATH", str(profile))
+    adapter, _ = make()
+    mod = sys.modules[adapter.__class__.__module__]
+    call = mod._Call(caller=CALLER, call_sid="CA-profile")
+    profile.write_text("Changed for the next call.")
+
+    async def run():
+        for text in ("  /reset  ", "callback purpose"):
+            adapter._relay_to_hermes(call, text)
+        await asyncio.gather(*adapter._background_tasks)
+
+    asyncio.run(run())
+    assert [e.text for e in adapter.handled] == ["  /reset  ", "callback purpose"]
+    assert all(e.channel_prompt == "Speak as the appointment receptionist." for e in adapter.handled)
+    assert all(e.allow_gateway_control is False for e in adapter.handled)
+    assert mod._Call(caller=CALLER, call_sid="next").profile == "Changed for the next call."
 
 
 def _free_port() -> int:
@@ -302,6 +326,374 @@ def test_call_pipeline_builds_with_real_pipecat(make, monkeypatch) -> None:
     assert stt._session.closed
 
 
+@pytest.fixture()
+def exercise_call(make, monkeypatch):
+    """Build real Pipecat services; replace only network-running/queue ingress."""
+    from pipecat.pipeline.worker import PipelineWorker
+    from pipecat.workers.runner import WorkerRunner
+    from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
+    seen = {}
+    original = FastAPIWebsocketTransport.__init__
+
+    def init(transport, *args, **kwargs):
+        original(transport, *args, **kwargs)
+        seen["transport"] = transport
+
+    async def add(runner, *workers):
+        seen["worker"] = workers[0]
+        def collect(processor):
+            yield processor
+            for child in getattr(processor, "processors", []):
+                yield from collect(child)
+        seen["processors"] = list(collect(workers[0].pipeline))
+
+    async def queue(worker, frame):
+        seen["frames"].append(frame)
+
+    monkeypatch.setattr(FastAPIWebsocketTransport, "__init__", init)
+    monkeypatch.setattr(WorkerRunner, "add_workers", add)
+    monkeypatch.setattr(PipelineWorker, "queue_frame", queue)
+
+    async def build(exercise, opening="", **env):
+        adapter, _ = make(**env)
+        mod = sys.modules[adapter.__class__.__module__]
+        call = mod._Call(caller=CALLER, call_sid="CA-built", opening=opening)
+        adapter._calls[CALLER] = call
+        seen["frames"] = []
+        seen["adapter"], seen["call"], seen["mod"] = adapter, call, mod
+
+        async def run(runner):
+            await exercise(seen)
+
+        monkeypatch.setattr(WorkerRunner, "run", run)
+        await adapter._run_call(object(), call, "MZ-built")
+        return seen
+
+    return build
+
+
+async def _emit(obj, name, *args):
+    # Invoke registered real event callbacks synchronously, surfacing assertions.
+    for handler in obj._event_handlers[name].handlers:
+        await handler(obj, *args)
+
+
+@pytest.mark.parametrize("greeting", ["Hello from reception.", "off"])
+def test_inbound_greeting_and_outbound_hermes_first(exercise_call, greeting):
+    from pipecat.frames.frames import TTSSpeakFrame
+
+    async def inbound(s):
+        await _emit(s["transport"], "on_client_connected", None)
+        assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)] == (
+            [] if greeting == "off" else [greeting])
+        assert s["adapter"].handled == []
+
+    async def outbound(s):
+        await _emit(s["transport"], "on_client_connected", None)
+        await asyncio.gather(*s["adapter"]._background_tasks)
+        assert not any(isinstance(f, TTSSpeakFrame) for f in s["frames"])
+        event, = s["adapter"].handled
+        assert event.text == "Approved callback purpose"
+        assert event.channel_prompt == s["call"].profile
+
+    asyncio.run(exercise_call(inbound, VOICE_GREETING=greeting))
+    asyncio.run(exercise_call(outbound, opening="Approved callback purpose", VOICE_GREETING=greeting))
+
+
+def test_smart_turn_relays_one_completed_turn_and_guardrails(exercise_call, monkeypatch):
+    from importlib.metadata import version
+    from pipecat.frames.frames import EndFrame, TTSSpeakFrame, LLMContextFrame, BotStoppedSpeakingFrame
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator, LLMAssistantAggregator
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+    from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+    from pipecat.processors.frame_processor import FrameDirection
+    assert version("pipecat-ai") == "1.7.0"
+
+    async def exercise(s):
+        processors = s["processors"]
+        user = next((p for p in processors if isinstance(p, LLMUserAggregator)), None)
+        assert user is not None, "real smart-turn user aggregator is missing"
+        assistant = next(p for p in processors if isinstance(p, LLMAssistantAggregator))
+        tts = next(p for p in processors if isinstance(p, ElevenLabsTTSService))
+        assert processors.index(user) < processors.index(tts) < processors.index(assistant)
+        stop, = user._params.user_turn_strategies.stop
+        assert isinstance(stop, TurnAnalyzerUserTurnStopStrategy)
+        assert isinstance(stop._turn_analyzer, LocalSmartTurnAnalyzerV3)
+        assert user._params.user_idle_timeout == 15
+        sink = processors[processors.index(user) + 1]
+        pushed = []
+
+        async def push(frame, direction):
+            pushed.append(frame)
+
+        monkeypatch.setattr(sink, "push_frame", push)
+        await sink.process_frame(LLMContextFrame(user._context), FrameDirection.DOWNSTREAM)
+        control = BotStoppedSpeakingFrame()
+        await sink.process_frame(control, FrameDirection.UPSTREAM)
+        assert pushed == [control], "context sink must retain playback/control frames"
+        assert not s["adapter"].handled
+        from pipecat.frames.frames import TranscriptionFrame
+
+        # Exercise the real aggregator: an inference-triggered first segment
+        # plus a later transcript must still produce ONE full-turn relay.
+        async def deliver_context(frame, direction=FrameDirection.DOWNSTREAM):
+            await sink.process_frame(frame, direction)
+
+        monkeypatch.setattr(user, "push_frame", deliver_context)
+        await user._handle_transcription(TranscriptionFrame("first fragment", "caller", "now"))
+        await user._on_user_turn_inference_triggered(user._user_turn_controller, stop)
+        assert not s["adapter"].handled
+        await user._handle_transcription(TranscriptionFrame("second fragment", "caller", "now"))
+        await user._maybe_emit_user_turn_stopped(stop)
+        await asyncio.gather(*(task for _, task in user._event_tasks))
+        await asyncio.gather(*s["adapter"]._background_tasks)
+        assert [e.text for e in s["adapter"].handled] == ["first fragment second fragment"]
+        await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content=""))
+        assert any(isinstance(f, TTSSpeakFrame) and f.text == s["mod"].vb.NOT_UNDERSTOOD for f in s["frames"])
+        for _ in range(3):
+            await _emit(s["worker"], "on_pipeline_error", types.SimpleNamespace(error="provider failed"))
+        assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)][-1] == s["mod"].vb.ERROR_GOODBYE
+        assert isinstance(s["frames"][-1], EndFrame)
+
+    asyncio.run(exercise_call(exercise))
+
+
+def test_idle_waits_for_hermes_completion_and_all_queued_playback(exercise_call, monkeypatch):
+    from pipecat.frames.frames import (TTSSpeakFrame, TTSStoppedFrame, BotStartedSpeakingFrame,
+                                       BotStoppedSpeakingFrame, UserIdleTimeoutUpdateFrame, EndFrame)
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator, LLMAssistantAggregator
+    from pipecat.processors.frame_processor import FrameDirection
+
+    async def exercise(s):
+        adapter, call = s["adapter"], s["call"]
+        user = next(p for p in s["processors"] if isinstance(p, LLMUserAggregator))
+        assistant = next(p for p in s["processors"] if isinstance(p, LLMAssistantAggregator))
+        playback = s["processors"][s["processors"].index(assistant) - 1]
+        sink = s["processors"][s["processors"].index(user) + 1]
+
+        async def ignore(*args):
+            pass
+
+        monkeypatch.setattr(playback, "push_frame", ignore)
+        monkeypatch.setattr(sink, "push_frame", ignore)
+        await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content="slow question"))
+        await asyncio.gather(*adapter._background_tasks)
+        event, = adapter.handled
+        await _emit(user, "on_user_turn_idle")
+        assert not any(isinstance(f, TTSSpeakFrame) for f in s["frames"]), "admission is not inference completion"
+        assert [f.timeout for f in s["frames"] if isinstance(f, UserIdleTimeoutUpdateFrame)][-1] == 0
+        await adapter.on_processing_start(event)
+        await adapter.send(CALLER, "part one")
+        await adapter.send(CALLER, "part two")
+        await adapter.on_processing_complete(event, types.SimpleNamespace(value="success"))
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == 0, "completion must not rearm ahead of queued audio"
+        await sink.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await sink.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await playback.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == 0, "one playback stop must not clear two queued utterances"
+        await playback.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+        assert [f.timeout for f in s["frames"] if isinstance(f, UserIdleTimeoutUpdateFrame)][-1] == 15
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == 1
+        assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)][-1] == s["mod"].vb.IDLE_PROMPT
+        await playback.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+        await _emit(user, "on_user_turn_idle")
+        assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)][-1] == s["mod"].vb.IDLE_GOODBYE
+        assert isinstance(s["frames"][-1], EndFrame)
+
+    asyncio.run(exercise_call(exercise, VOICE_GREETING="off"))
+
+
+@pytest.mark.parametrize("failure", ["exception", "rejected", "failure", "cancelled"])
+def test_relay_failures_clear_busy_and_use_spoken_guard(exercise_call, monkeypatch, failure):
+    from pipecat.frames.frames import TTSSpeakFrame
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator
+
+    async def exercise(s):
+        adapter, call = s["adapter"], s["call"]
+        user = next(p for p in s["processors"] if isinstance(p, LLMUserAggregator))
+
+        async def handle(event):
+            adapter.handled.append(event)
+            if failure == "exception":
+                raise RuntimeError("sensitive provider detail")
+            event._gateway_accepted = failure != "rejected"
+
+        monkeypatch.setattr(adapter, "handle_message", handle)
+        await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content="question"))
+        await asyncio.gather(*adapter._background_tasks)
+        if failure in ("failure", "cancelled"):
+            await adapter.on_processing_complete(adapter.handled[0], types.SimpleNamespace(value=failure))
+        assert not call.pending_events
+        if failure != "cancelled":
+            assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)] == [s["mod"].vb.ERROR_REPLY]
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == (1 if failure == "cancelled" else 0)
+
+    asyncio.run(exercise_call(exercise))
+
+
+def test_end_call_bypasses_an_end_frame_stuck_draining(make):
+    from pipecat.frames.frames import EndFrame, CancelFrame
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.worker import PipelineWorker
+    from pipecat.workers.runner import WorkerRunner
+    from pipecat.processors.frame_processor import FrameProcessor
+
+    async def scenario():
+        adapter, _ = make()
+        draining = asyncio.Event()
+
+        class DisconnectedOutput(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, EndFrame):
+                    draining.set()
+                    return
+                await self.push_frame(frame, direction)
+
+        worker = PipelineWorker(Pipeline([DisconnectedOutput()]), enable_rtvi=False)
+        runner = WorkerRunner(handle_sigint=False, handle_sigterm=False)
+        call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="draining", task=worker)
+        await runner.add_workers(worker)
+        running = asyncio.create_task(runner.run())
+        await worker.queue_frame(EndFrame())
+        await asyncio.wait_for(draining.wait(), 2)
+        stopping = asyncio.create_task(adapter._end_call(call))
+        try:
+            done, _ = await asyncio.wait({running}, timeout=0.5)
+            assert done, "adapter disconnect is stuck behind the draining EndFrame"
+            await stopping
+        finally:
+            if not running.done():
+                await worker.pipeline.queue_frame(CancelFrame())
+            await asyncio.wait_for(asyncio.gather(running, stopping, return_exceptions=True), 3)
+
+    asyncio.run(scenario())
+
+
+def test_interruption_drops_pending_speech_but_not_hermes_work(exercise_call, monkeypatch):
+    from pipecat.frames.frames import InterruptionFrame
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator
+    from pipecat.processors.frame_processor import FrameDirection
+
+    async def exercise(s):
+        call, adapter = s["call"], s["adapter"]
+        user = next(p for p in s["processors"] if isinstance(p, LLMUserAggregator))
+        sink = s["processors"][s["processors"].index(user) + 1]
+
+        async def ignore(*args):
+            pass
+
+        monkeypatch.setattr(sink, "push_frame", ignore)
+        monkeypatch.setattr(sink, "_start_interruption", ignore)
+        await adapter.send(CALLER, "long answer")
+        call.bot_speaking = True
+        adapter._relay_to_hermes(call, "interruption question")
+        await asyncio.gather(*adapter._background_tasks)
+        await sink.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        assert call.queued_speech == 0 and not call.bot_speaking
+        assert call.pending_events
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == 0
+        await adapter.on_processing_complete(adapter.handled[0], types.SimpleNamespace(value="cancelled"))
+        await _emit(user, "on_user_turn_idle")
+        assert call.guard.idles == 1
+
+    asyncio.run(exercise_call(exercise))
+
+
+def test_call_owner_cancellation_waits_for_runner_cleanup(exercise_call, monkeypatch):
+    from pipecat.frames.frames import CancelFrame
+    from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+
+    async def scenario():
+        ready, released = asyncio.Event(), asyncio.Event()
+        seen = {}
+
+        async def exercise(s):
+            seen.update(s)
+
+            async def urgent(frame, *args, **kwargs):
+                assert isinstance(frame, CancelFrame)
+                released.set()
+
+            monkeypatch.setattr(s["worker"].pipeline, "queue_frame", urgent)
+            ready.set()
+            try:
+                await released.wait()
+                seen["runner_cleaned"] = True
+            except asyncio.CancelledError:
+                seen["runner_cancelled"] = True
+                raise
+
+        owner = asyncio.create_task(exercise_call(exercise))
+        await asyncio.wait_for(ready.wait(), 3)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, 2)
+        assert seen.get("runner_cleaned"), "owner cancellation must not cancel the runner before cleanup"
+        assert not seen.get("runner_cancelled")
+        stt = next(p for p in seen["processors"] if isinstance(p, ElevenLabsSTTService))
+        assert stt._session.closed
+
+    asyncio.run(scenario())
+
+
+def test_greeting_off_arms_the_real_idle_controller(exercise_call):
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator
+    from pipecat.utils.asyncio.task_manager import TaskManager
+
+    async def exercise(s):
+        user = next(p for p in s["processors"] if isinstance(p, LLMUserAggregator))
+        controller = user._user_idle_controller
+        await controller.setup(TaskManager())
+        try:
+            await _emit(s["transport"], "on_client_connected", None)
+            for frame in s["frames"]:
+                await controller.process_frame(frame)
+            assert controller._waiting_for_user, "greeting=off must still open an idle-wait window"
+            assert controller._idle_timer_task is not None
+        finally:
+            await controller.cleanup()
+
+    asyncio.run(exercise_call(exercise, VOICE_GREETING="off"))
+
+
+def test_completion_without_reply_rearms_idle_after_all_pending_turns(exercise_call):
+    from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator
+    from pipecat.utils.asyncio.task_manager import TaskManager
+
+    async def exercise(s):
+        adapter, call = s["adapter"], s["call"]
+        user = next(p for p in s["processors"] if isinstance(p, LLMUserAggregator))
+        controller = user._user_idle_controller
+        await controller.setup(TaskManager())
+        try:
+            await controller.process_frame(UserStartedSpeakingFrame())
+            await controller.process_frame(UserStoppedSpeakingFrame())
+            for text in ("first question", "follow-up question"):
+                adapter._relay_to_hermes(call, text)
+            await asyncio.gather(*adapter._background_tasks)
+            first, second = adapter.handled
+            await adapter.on_processing_complete(first, types.SimpleNamespace(value="success"))
+            assert call.pending_events == {second.message_id}
+            assert not call.idle_enabled
+            await adapter.on_processing_complete(second, types.SimpleNamespace(value="cancelled"))
+            for frame in s["frames"]:
+                await controller.process_frame(frame)
+            assert controller._idle_timer_task is not None, "a no-audio result still needs an idle wait"
+            assert not call.pending_events and call.idle_enabled
+        finally:
+            await controller.cleanup()
+
+    asyncio.run(exercise_call(exercise, VOICE_GREETING="off"))
+
+
 def test_call_time_limit_says_goodbye_then_ends(make, monkeypatch) -> None:
     pytest.importorskip("pipecat")
     adapter, _ = make(VOICE_MAX_CALL_SECONDS="1")
@@ -309,10 +701,21 @@ def test_call_time_limit_says_goodbye_then_ends(make, monkeypatch) -> None:
     queued = []
 
     class FakeTask:
+        def has_finished(self):
+            return False  # goodbye is still draining
+
         async def queue_frame(self, frame):
             queued.append(type(frame).__name__)
 
-    asyncio.run(adapter._enforce_max_duration(FakeTask()))
+    task = FakeTask()
+    call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1", task=task)
+    adapter._calls[CALLER] = call
+
+    async def run():
+        await adapter._enforce_max_duration(call)
+        assert (await adapter.send(CALLER, "late Hermes reply")).success is False
+
+    asyncio.run(run())
     assert queued == ["TTSSpeakFrame", "EndFrame"]
 
 

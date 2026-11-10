@@ -29,6 +29,7 @@ class MessageEvent:
     source: Any = None
     message_id: Optional[str] = None
     allow_gateway_control: bool = True
+    channel_prompt: Optional[str] = None
 
 
 class FakeBase:

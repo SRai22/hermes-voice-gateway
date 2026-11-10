@@ -111,3 +111,24 @@ Suite after fixes: 71 passed.
 | Smart turn drives end of speech | pass (wiring only) | aggregator stop strategies == [TurnAnalyzerUserTurnStopStrategy] | not run on live audio; stop_secs left at Pipecat's 3s fallback |
 | Guardrails: idle, error, empty turn | pass for idle and error; unresolved for empty turn | idle/error handlers fired in test; handler fired in test (on_user_turn_stopped with empty content) | unverified that 1.7.0 fires on_user_turn_stopped for a no-transcript turn; needs a live noise test |
 | Full suite | pass | 79 passed on pipecat 1.7.0 and 1.15.0 | none |
+
+## Local-first verification on exactly Pipecat 1.7.0
+
+The earlier 1.15.0 results above are historical, not the current version policy. Current repository dependencies and install hints require exactly 1.7.0.
+
+- Verified the dedicated Python 3.12 test environment and the current Hermes-managed Python 3.14 runtime both import Pipecat 1.7.0 from their own site-packages.
+- Baseline suite after exact-version regression tests: 81 passed (six upstream deprecation warnings).
+- Real provider/WebRTC test, no audio saved: ElevenLabs input speech HTTP 200; WebRTC data channel opened; greeting returned non-silent audio; Scribe transcribed “Please say that the local voice test is working”; OpenAI HTTP 200 replied “The local voice test is working.”; reply audio returned to the client.
+- Real silence triggered “Are you still there?” followed by the idle goodbye and EndFrame. Initial shutdown hung: a worker cancellation could queue behind a goodbye already draining, and normal WebRTC closure emits `closed`, which was not handled. Added a real-worker regression, urgent pipeline cancellation while shielding the runner, and a `closed` handler. Live retests verified natural goodbye completion and peer closure during goodbye both finish with `CLEANUP_CONNECTIONS 0`. Suite after the fix: 82 passed, six upstream deprecation warnings. Emitting EndFrame alone is not proof of a successful hang-up.
+- Normal `hermes plugins validate .` and `hermes plugins doctor . --ci` passed (three tools, one hook).
+- `hermes plugins validate . --install-deps` reported a dependency preparation failure: two workspace members named `hermes-voice-gateway`. Its later “Validation passed” and zero exit status do not mean dependency installation succeeded.
+- Live custom-profile test also passed: a scratch profile required the reply to begin “Profile check confirmed”; the real OpenAI response complied, audio returned, and automatic cleanup left zero connections. No user profile file or credentials were changed.
+- The installed plugin is a separate, older checkout with extensive pre-existing changes. Only its dependency pins and install hints were aligned to exactly 1.7.0; its behaviour code has not been replaced with this working tree, and the gateway has not been restarted.
+
+## Adapter port verification on Pipecat 1.7.0
+
+- Full suite: **96 passed**, 35 upstream deprecation warnings. Exact-version tests, plugin validation, plugin doctor (three tools, one hook), and `git diff --check` passed.
+- Regression coverage: profile snapshot on every relay; configurable inbound greeting; no duplicate greeting for outbound callbacks; real smart-turn aggregation across transcription segments; context sink/control-frame preservation; assistant aggregation after output; empty/error/idle responses; slow processing and multiple queued replies; rejected/failed/cancelled admissions; interruption bookkeeping; greeting-off and silent-completion idle startup; urgent disconnect while EndFrame drains; runner cancellation waits for cleanup.
+- Actual localhost Twilio-format WebSocket smoke test used real ElevenLabs speech generation, STT, and TTS. The Hermes admission/processing/reply lifecycle was explicitly simulated; Twilio REST auto-hangup was disabled in the probe only, and no phone call was placed. It relayed one complete transcript with a profile, received 159 media messages (136 non-silent), suppressed idle while processing exceeded the timeout, then completed two idle events and released all calls. Probe exited 0.
+- Remaining live checks: real Hermes lifecycle and tools over a real inbound Twilio call, outbound callback opening, Twilio REST hangup, noise-only/empty recognition, and full barge-in behaviour. Constructor tests and locally simulated lifecycle checks do not establish these.
+- Final review extended the duration-limit regression: a late Hermes reply must be refused while the timer's goodbye drains, just like an idle/error goodbye. The duration limiter now uses the same per-call ending/playback bookkeeping. Full suite remains 96 passed.

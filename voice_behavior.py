@@ -1,4 +1,4 @@
-"""Call behaviour shared by the local pipeline and (next) the Twilio adapter: greeting, voice profile, guardrails.
+"""Call behaviour shared by the local pipeline and Twilio adapter: greeting, voice profile, guardrails.
 
 Plain Python, no Pipecat import, so the plugin still loads without it.
 """

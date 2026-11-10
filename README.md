@@ -2,7 +2,7 @@
 Hermes Voice Gateway connects your business phone line to Hermes. It answers calls, uses the tools your team already works with, and makes approved callbacks.
 
 ## Status
-Inbound calls, operator-approved callbacks and call-status lookup are built and tested with fakes. None of it has been tried against a live Twilio number or a running Hermes.
+Inbound calls, operator-approved callbacks and call-status lookup are built. The local WebRTC pipeline has passed real ElevenLabs/OpenAI audio checks. The adapter has passed real ElevenLabs audio over a local Twilio-format WebSocket with a simulated Hermes lifecycle, plus regression tests. A real Twilio call through the running Hermes gateway is still unverified.
 
 ## How a call works
 Twilio -> `POST <VOICE_WEBHOOK_URL>/voice` (signature checked) -> TwiML opens a media stream to `/media` -> ElevenLabs speech-to-text -> the transcript goes to Hermes as a normal message from the caller's number -> Hermes' reply is spoken with ElevenLabs.
@@ -34,7 +34,7 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 
 ## Limits (from the Pipecat telephony docs)
 - Twilio WebSocket calls have basic call control only: no transfers or reconnects. Those need Daily PSTN/SIP.
-- The caller cannot interrupt Hermes mid-sentence yet. Pipecat interruptions come from its user-turn strategies in an LLM aggregator, which this pipeline does not use (Hermes is the "LLM").
+- Pipecat's user-turn strategies can interrupt queued speech. Cancellation of Hermes' ongoing reasoning/tools is not coordinated with playback interruption, so full phone-call barge-in remains unverified.
 - A dropped connection ends the call. Twilio call-status callbacks are not wired in, so a callback's stored status stays `answered` after the call ends (use `voice_check_call_status` for the live state).
 - Calls to voicemail are not detected; the agent may speak to an answering machine.
 
@@ -43,13 +43,16 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 - Pipecat logs caller speech (the transcript) at DEBUG level. Run Hermes with `LOGURU_LEVEL=INFO` or higher so transcripts stay out of logs.
 - Spoken words never run Hermes `/commands`; calls are plain conversation only.
 
-## Call behaviour (local pipeline now; Twilio adapter next)
+## Call behaviour (local pipeline and Twilio adapter)
 - **Greeting**: the agent speaks first when a call connects. `VOICE_GREETING` overrides the text; `off` disables it.
-- **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) is the system prompt for calls, like a SOUL.md but short-reply and speakable. If the file is missing or empty, a built-in short-reply profile is used.
+- **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) supplies short-reply, speakable instructions. If missing or empty, a built-in profile is used. Locally it is the OpenAI system instruction; the adapter snapshots it per call and supplies it to Hermes through `channel_prompt`, without changing the caller's transcript or replacing Hermes' own safety instructions.
 - **Smart turn**: Pipecat's local smart-turn model decides from the audio when the caller has finished, instead of replying after any pause.
 - **Guardrails**: a turn with no recognised words makes the agent ask the caller to repeat (up to twice in a row); silence gets "Are you still there?" and then a hang-up; three pipeline errors in one call end it with an apology.
+- **Adapter timing**: one completed smart turn becomes one Hermes message. Idle detection pauses while Hermes is processing and while speech is queued or playing. Outbound callbacks retain their approved-purpose, Hermes-first opening instead of speaking a second generic greeting.
 
 ## Local dev (no phone)
+Use **Pipecat 1.7.0 exactly**, not a floating 1.7.x or 1.15.x release. Both dependency declarations and install hints use the same pin. Verify the actual interpreter as well as the dependency files; the Hermes-managed runtime and a shell's Python can be different environments.
+
 `voice_start_local_pipeline` and `frontend/` give a browser-mic test loop that does not involve Twilio or Hermes' agent. Run `python scripts/start_local_pipeline.py`, then open http://127.0.0.1:8765/. Dev only; it is not part of the shipped plugin.
 
 ## Tests

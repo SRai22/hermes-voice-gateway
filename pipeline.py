@@ -70,7 +70,17 @@ async def _run_pipeline(runner, task, session, connection_id: str) -> None:
     """Run the pipeline, then release its HTTP session and connection entry."""
     try:
         await runner.add_workers(task)
-        await runner.run()
+        runner_task = asyncio.create_task(runner.run())
+        try:
+            await asyncio.shield(runner_task)
+        except asyncio.CancelledError:
+            from pipecat.frames.frames import CancelFrame
+
+            # In 1.7.0 worker.cancel() queues behind an EndFrame that may
+            # already be waiting for playback from a disconnected peer.
+            # Inject the urgent frame directly so that wait can complete.
+            await task.pipeline.queue_frame(CancelFrame())
+            await runner_task
     except Exception:
         logger.exception("pipeline %s crashed", connection_id)
     finally:
@@ -177,7 +187,7 @@ async def start_local_pipeline() -> dict:
                 "Pipecat or smallwebrtc not installed: "
                 + str(exc)
                 + ". Install pipecat-ai[elevenlabs,openai,silero,webrtc]"
-                ">=1.15.0,<1.16.0 to use the local pipeline."
+                "==1.7.0 to use the local pipeline."
             ),
         }
 
@@ -214,6 +224,7 @@ async def start_local_pipeline() -> dict:
 
     connection.event_handler("disconnected")(on_disconnect)
     connection.event_handler("failed")(on_disconnect)
+    connection.event_handler("closed")(on_disconnect)
 
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
@@ -244,7 +255,7 @@ async def start_local_pipeline() -> dict:
     )
 
     # --- RTVI (real-time voice interface control channel) ---
-    rtvi = RTVIProcessor(transport=transport)
+    rtvi = RTVIProcessor()
     rtvi_observer = RTVIObserver(rtvi=rtvi)
     rtvi_params = RTVIObserverParams()
 

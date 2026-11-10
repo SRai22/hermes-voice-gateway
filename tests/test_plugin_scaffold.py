@@ -44,6 +44,7 @@ def test_register_wires_platform_tools_and_hook(monkeypatch) -> None:
     assert platform["name"] == "voice"
     assert platform["allowed_users_env"] == "VOICE_ALLOWED_USERS"
     assert "VOICE_WEBHOOK_URL" in platform["required_env"]
+    assert "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]==1.7.0" in platform["install_hint"]
 
 
 def test_platform_factory_is_lazy_and_requirements_probe_is_passive(monkeypatch) -> None:
