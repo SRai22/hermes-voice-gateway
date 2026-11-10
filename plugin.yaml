@@ -58,5 +58,5 @@ provides_tools:
 provides_hooks:
   - pre_tool_call
 python_dependencies:
-  - "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.15.0,<1.16.0"
+  - "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.7.0,<1.8.0"
   - "uvicorn>=0.32,<1"

@@ -267,11 +267,17 @@ def test_call_pipeline_builds_with_real_pipecat(make, monkeypatch) -> None:
     from pipecat.pipeline.worker import PipelineWorker
     from pipecat.workers.runner import WorkerRunner
 
+    monkeypatch.delenv("ELEVENLABS_STT_MODEL", raising=False)
     adapter, _ = make()
     seen = {}
 
     async def fake_add(self, *workers):  # no network: just record the worker
         seen["task"] = workers[0]
+        def collect(processor):
+            yield processor
+            for child in getattr(processor, "processors", []):
+                yield from collect(child)
+        seen["processors"] = list(collect(workers[0].pipeline))
 
     async def fake_run(self, *args, **kwargs):
         return None
@@ -285,6 +291,15 @@ def test_call_pipeline_builds_with_real_pipecat(make, monkeypatch) -> None:
     call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1")
     asyncio.run(adapter._run_call(FakeWebSocket(), call, "MZ1"))
     assert isinstance(call.task, PipelineWorker) and seen["task"] is call.task
+    from pipecat.processors.audio.vad_processor import VADProcessor
+    from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+
+    processors = seen["processors"]
+    stt = next(p for p in processors if isinstance(p, ElevenLabsSTTService))
+    vad = next(p for p in processors if isinstance(p, VADProcessor))
+    assert processors.index(vad) < processors.index(stt)
+    assert adapter._stt_model == "scribe_v2"
+    assert stt._session.closed
 
 
 def test_call_time_limit_says_goodbye_then_ends(make, monkeypatch) -> None:

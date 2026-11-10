@@ -29,6 +29,9 @@ There is deliberately no agent-callable approve tool, and spoken words cannot ru
 
 Needs `TWILIO_PHONE_NUMBER` in addition to the inbound settings.
 
+## Speech recognition
+Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local development pipeline. Silero VAD detects the end of each spoken segment, then the audio is uploaded for transcription. Pause after speaking to let Hermes respond; this is segmented HTTP transcription, not the realtime WebSocket API. Each call owns an HTTP session that closes when the call ends or setup fails.
+
 ## Limits (from the Pipecat telephony docs)
 - Twilio WebSocket calls have basic call control only: no transfers or reconnects. Those need Daily PSTN/SIP.
 - The caller cannot interrupt Hermes mid-sentence yet. Pipecat interruptions come from its user-turn strategies in an LLM aggregator, which this pipeline does not use (Hermes is the "LLM").

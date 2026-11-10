@@ -5,7 +5,7 @@ Call flow:
      signature, check the caller is allowed, and answer with TwiML that opens a
      Media Stream to ``/media``. The TwiML carries a one-time token.
   2. Twilio opens the ``/media`` WebSocket. We redeem the token, then run a Pipecat
-     pipeline: Twilio audio -> ElevenLabs realtime STT -> transcript relay.
+     pipeline: Twilio audio -> VAD-segmented ElevenLabs Scribe v2 STT -> transcript relay.
   3. Each final transcript is handed to Hermes as a normal ``MessageEvent``
      (chat_id = the caller's number), so the Hermes agent, its tools and its memory
      handle the call.
@@ -79,7 +79,7 @@ class VoiceAdapter(BasePlatformAdapter):
         self._allowed = parse_allowed(secret("VOICE_ALLOWED_USERS"))
         self._allow_all = secret("VOICE_ALLOW_ALL_USERS").lower() == "true"
         self._insecure = secret("VOICE_INSECURE_NO_SIGNATURE").lower() == "true"
-        self._stt_model = secret("ELEVENLABS_STT_MODEL", "scribe_v2_realtime")
+        self._stt_model = secret("ELEVENLABS_STT_MODEL", "scribe_v2")
         self._tts_model = secret("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
         self._voice_id = secret("ELEVENLABS_VOICE_ID")
         self._tokens = StreamTokens()
@@ -311,10 +311,12 @@ class VoiceAdapter(BasePlatformAdapter):
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
         from pipecat.processors.frame_processor import FrameProcessor
         from pipecat.serializers.twilio import TwilioFrameSerializer
+        import aiohttp
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.processors.audio.vad_processor import VADProcessor
         from pipecat.services.elevenlabs.stt import (
-            CommitStrategy,
-            ElevenLabsRealtimeSTTService,
-            ElevenLabsRealtimeSTTSettings,
+            ElevenLabsSTTService,
+            ElevenLabsSTTSettings,
         )
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsTTSSettings
         from pipecat.transports.websocket.fastapi import (
@@ -352,44 +354,46 @@ class VoiceAdapter(BasePlatformAdapter):
                 ),
             ),
         )
-        stt = ElevenLabsRealtimeSTTService(
-            api_key=self._elevenlabs_key,
-            commit_strategy=CommitStrategy.VAD,
-            settings=ElevenLabsRealtimeSTTSettings(model=self._stt_model),
-        )
-        tts_settings = {"model": self._tts_model}
-        if self._voice_id:
-            tts_settings["voice"] = self._voice_id
-        tts = ElevenLabsTTSService(
-            api_key=self._elevenlabs_key,
-            settings=ElevenLabsTTSSettings(**tts_settings),
-        )
-        pipeline = Pipeline([transport.input(), stt, TranscriptRelay(), tts, transport.output()])
-        task = PipelineWorker(
-            pipeline,
-            params=PipelineParams(audio_in_sample_rate=SAMPLE_RATE, audio_out_sample_rate=SAMPLE_RATE),
-        )
-        call.task = task
+        async with aiohttp.ClientSession() as session:
+            stt = ElevenLabsSTTService(
+                api_key=self._elevenlabs_key,
+                aiohttp_session=session,
+                settings=ElevenLabsSTTSettings(model=self._stt_model),
+            )
+            vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
+            tts_settings = {"model": self._tts_model}
+            if self._voice_id:
+                tts_settings["voice"] = self._voice_id
+            tts = ElevenLabsTTSService(
+                api_key=self._elevenlabs_key,
+                settings=ElevenLabsTTSSettings(**tts_settings),
+            )
+            pipeline = Pipeline([transport.input(), vad, stt, TranscriptRelay(), tts, transport.output()])
+            task = PipelineWorker(
+                pipeline,
+                params=PipelineParams(audio_in_sample_rate=SAMPLE_RATE, audio_out_sample_rate=SAMPLE_RATE),
+            )
+            call.task = task
 
-        @transport.event_handler("on_client_connected")
-        async def _on_connect(_transport, _client):
-            if call.opening:  # outbound callback: Hermes speaks first
-                self._relay_to_hermes(call, call.opening)
+            @transport.event_handler("on_client_connected")
+            async def _on_connect(_transport, _client):
+                if call.opening:  # outbound callback: Hermes speaks first
+                    self._relay_to_hermes(call, call.opening)
 
-        @transport.event_handler("on_client_disconnected")
-        async def _on_disconnect(_transport, _client):
-            await task.cancel()
+            @transport.event_handler("on_client_disconnected")
+            async def _on_disconnect(_transport, _client):
+                await task.cancel()
 
-        runner = WorkerRunner(handle_sigint=False)
-        await runner.add_workers(task)
-        limiter = None
-        if self._max_call_seconds > 0:
-            limiter = asyncio.create_task(self._enforce_max_duration(task))
-        try:
-            await runner.run()
-        finally:
-            if limiter is not None:
-                limiter.cancel()
+            runner = WorkerRunner(handle_sigint=False)
+            await runner.add_workers(task)
+            limiter = None
+            if self._max_call_seconds > 0:
+                limiter = asyncio.create_task(self._enforce_max_duration(task))
+            try:
+                await runner.run()
+            finally:
+                if limiter is not None:
+                    limiter.cancel()
 
     async def _enforce_max_duration(self, task) -> None:
         """Say goodbye and end the call after VOICE_MAX_CALL_SECONDS (Pipecat docs: not automatic)."""

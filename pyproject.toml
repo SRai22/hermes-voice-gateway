@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [{name = "Shravan Rai"}]
 keywords = ["hermes", "voice", "gateway", "twilio", "pipecat", "elevenlabs", "openai"]
 dependencies = [
-    "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.15.0,<1.16.0",
+    "pipecat-ai[elevenlabs,openai,silero,webrtc,websocket]>=1.7.0,<1.8.0",
     "uvicorn>=0.32,<1",
 ]
 
