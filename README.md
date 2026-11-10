@@ -43,6 +43,12 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 - Pipecat logs caller speech (the transcript) at DEBUG level. Run Hermes with `LOGURU_LEVEL=INFO` or higher so transcripts stay out of logs.
 - Spoken words never run Hermes `/commands`; calls are plain conversation only.
 
+## Call behaviour (local pipeline now; Twilio adapter next)
+- **Greeting**: the agent speaks first when a call connects. `VOICE_GREETING` overrides the text; `off` disables it.
+- **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) is the system prompt for calls, like a SOUL.md but short-reply and speakable. If the file is missing or empty, a built-in short-reply profile is used.
+- **Smart turn**: Pipecat's local smart-turn model decides from the audio when the caller has finished, instead of replying after any pause.
+- **Guardrails**: a turn with no recognised words makes the agent ask the caller to repeat (up to twice in a row); silence gets "Are you still there?" and then a hang-up; three pipeline errors in one call end it with an apology.
+
 ## Local dev (no phone)
 `voice_start_local_pipeline` and `frontend/` give a browser-mic test loop that does not involve Twilio or Hermes' agent. Run `python scripts/start_local_pipeline.py`, then open http://127.0.0.1:8765/. Dev only; it is not part of the shipped plugin.
 

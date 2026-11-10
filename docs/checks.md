@@ -100,3 +100,14 @@ Independent reviewer found no path for an agent to dial or approve without a hum
 | not verified | open | real `plugin_db` connection lifecycle and busy timeouts; whether other Hermes tools can invoke `/voice-callback`; live Twilio signature behaviour |
 
 Suite after fixes: 71 passed.
+
+## Call behaviour, local pipeline (self-review, no independent reviewer agent used)
+
+| requirement | verdict | evidence | correction |
+|---|---|---|---|
+| Baseline before changes | pass | scratch venv pipecat 1.15.0: 71 passed | none |
+| Greeting spoken on connect, configurable, can be off | pass | test_pipeline_has_greeting_... fires on_client_connected, sees TTSSpeakFrame("Ahoy!"); test_greeting_default_custom_and_off | audible result not heard |
+| Voice profile reaches the LLM; default when missing/blank; capped | pass | same test checks OpenAILLMService system_instruction; test_profile_* | none |
+| Smart turn drives end of speech | pass (wiring only) | aggregator stop strategies == [TurnAnalyzerUserTurnStopStrategy] | not run on live audio; stop_secs left at Pipecat's 3s fallback |
+| Guardrails: idle, error, empty turn | pass for idle and error; unresolved for empty turn | idle/error handlers fired in test; handler fired in test (on_user_turn_stopped with empty content) | unverified that 1.7.0 fires on_user_turn_stopped for a no-transcript turn; needs a live noise test |
+| Full suite | pass | 79 passed on pipecat 1.7.0 and 1.15.0 | none |

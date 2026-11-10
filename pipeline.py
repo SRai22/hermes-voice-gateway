@@ -5,8 +5,10 @@ Sets up a complete Pipecat voice pipeline running locally over WebRTC
 Twilio phone lines.
 
 Pipeline flow:
-  WebRTC audio in → ElevenLabs STT → LLM context aggregator (user) → OpenAI LLM
-  → LLM context aggregator (assistant) → ElevenLabs TTS → WebRTC audio out
+  WebRTC audio in → VAD → ElevenLabs STT → user aggregator (smart-turn end-of-speech)
+  → OpenAI LLM → ElevenLabs TTS → WebRTC audio out → assistant aggregator
+
+Call behaviour (greeting, voice profile, guardrails) lives in ``voice_behavior``.
 
 All Pipecat / smallwebrtc / ElevenLabs / OpenAI imports live inside the
 ``start_local_pipeline`` function, never at module load. The plugin registers
@@ -30,6 +32,10 @@ try:  # plugin package under Hermes
     from ._env import secret
 except ImportError:  # imported top-level by the dev scripts
     from _env import secret
+try:
+    from . import voice_behavior as vb
+except ImportError:
+    import voice_behavior as vb
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,8 @@ logger = logging.getLogger(__name__)
 REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
 
 SIGNALING_PORT = 8765
+
+IDLE_SECONDS = 15.0  # silence before "Are you still there?"
 
 # Registry of active WebRTC connections, keyed by connection id.
 # A signaling server can look up a connection here to exchange SDP with a
@@ -156,6 +164,12 @@ async def start_local_pipeline() -> dict:
         )
         from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.processors.audio.vad_processor import VADProcessor
+        from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import (
+            LocalSmartTurnAnalyzerV3,
+        )
+        from pipecat.frames.frames import EndFrame, TTSSpeakFrame
+        from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+        from pipecat.turns.user_turn_strategies import UserTurnStrategies
     except ImportError as exc:
         return {
             "ok": False,
@@ -172,9 +186,12 @@ async def start_local_pipeline() -> dict:
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            # VAD bypassed for testing — all audio passes through to STT
-            user_turn_stop_timeout=5.0,
-            user_idle_timeout=0,
+            # Smart turn: a local model decides from the audio whether the caller
+            # has finished, instead of replying after any short pause.
+            user_turn_strategies=UserTurnStrategies(
+                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]
+            ),
+            user_idle_timeout=IDLE_SECONDS,
         ),
     )
 
@@ -183,11 +200,7 @@ async def start_local_pipeline() -> dict:
         api_key=openai_key,
         settings=OpenAILLMSettings(
             model=llm_model,
-            system_instruction=(
-                "You are a helpful assistant in a voice conversation. "
-                "Keep responses concise and natural for text-to-speech. "
-                "Avoid emojis, bullet points, and formatting that can't be spoken."
-            ),
+            system_instruction=vb.load_profile(),
         ),
     )
 
@@ -244,7 +257,8 @@ async def start_local_pipeline() -> dict:
     #   TTS → transport.output().
     # NOTE: assistant_aggregator (from LLMContextAggregatorPair) swallows
     # LLMTextFrame frames (buffers into context only, never pushes downstream),
-    # so it must NOT sit between LLM and TTS or TTS never receives text.
+    # so it must NOT sit between LLM and TTS or TTS never receives text. After
+    # transport.output() it records what was actually spoken (greeting included).
     pipeline = Pipeline(
         processors=[
             transport.input(),
@@ -254,6 +268,7 @@ async def start_local_pipeline() -> dict:
             llm,
             tts,
             transport.output(),
+            assistant_aggregator,
         ],
     )
 
@@ -266,6 +281,37 @@ async def start_local_pipeline() -> dict:
         rtvi_observer_params=rtvi_params,
     )
     runner = WorkerRunner()
+
+    # --- Greeting ---
+    opening = vb.greeting()
+
+    @transport.event_handler("on_client_connected")
+    async def _greet(_transport, _client) -> None:
+        if opening:
+            await task.queue_frame(TTSSpeakFrame(opening))
+
+    # --- Guardrails: spoken fallbacks, then hang up if the call stays broken ---
+    guard = vb.CallGuard()
+
+    async def say(text: str, hang_up: bool) -> None:
+        await task.queue_frame(TTSSpeakFrame(text))
+        if hang_up:
+            await task.queue_frame(EndFrame())
+
+    @task.event_handler("on_pipeline_error")
+    async def _on_error(_task, frame) -> None:
+        logger.warning("pipeline error: %s", getattr(frame, "error", frame))
+        await say(*guard.on_error())
+
+    @user_aggregator.event_handler("on_user_turn_idle")
+    async def _on_idle(_aggregator) -> None:
+        await say(*guard.on_idle())
+
+    @user_aggregator.event_handler("on_user_turn_stopped")
+    async def _on_turn(_aggregator, _strategy, message) -> None:
+        text = guard.on_turn(message.content)  # sound with no words -> ask to repeat
+        if text:
+            await say(text, False)
 
     # Start the runner as a background task so this function returns
     # immediately while the pipeline keeps running and waiting for a

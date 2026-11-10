@@ -42,6 +42,12 @@ optional_env:
   - name: VOICE_INSECURE_NO_SIGNATURE
     description: "true turns off Twilio signature checks. Local dev only"
     password: false
+  - name: VOICE_GREETING
+    description: "What the agent says when a call connects (default: Hi, how can I help you today?). off = no greeting"
+    password: false
+  - name: VOICE_PROFILE_PATH
+    description: "Voice-mode profile (system prompt for calls). Default <HERMES_HOME>/voice/PROFILE.md; built-in short-reply profile if missing"
+    password: false
   - name: ELEVENLABS_VOICE_ID
     description: ElevenLabs voice for replies
     password: false

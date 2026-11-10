@@ -53,3 +53,91 @@ def test_disconnect_cancels_pipeline_and_waits_for_cleanup(monkeypatch) -> None:
         assert cleanup_finished.is_set()
 
     asyncio.run(scenario())
+
+
+def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tmp_path) -> None:
+    """Needs pipecat installed. Builds the real pipeline (no network) and fires its handlers."""
+    pytest.importorskip("pipecat")
+    from pipecat.frames.frames import EndFrame, ErrorFrame, TTSSpeakFrame
+    from pipecat.pipeline.worker import PipelineWorker
+    from pipecat.transports.smallwebrtc import transport as webrtc
+    from pipecat.workers.runner import WorkerRunner
+
+    (tmp_path / "PROFILE.md").write_text("Speak like a pirate.", encoding="utf-8")
+    monkeypatch.setenv("VOICE_PROFILE_PATH", str(tmp_path / "PROFILE.md"))
+    monkeypatch.setenv("VOICE_GREETING", "Ahoy!")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    built, queued = {}, []
+
+    async def fake_add(self, *workers):
+        built["worker"] = workers[0]
+
+    async def fake_run(self, *args, **kwargs):
+        return None
+
+    async def fake_queue(self, frame):
+        queued.append(frame)
+
+    class Spy(webrtc.SmallWebRTCTransport):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built["transport"] = self
+
+    monkeypatch.setattr(WorkerRunner, "add_workers", fake_add)
+    monkeypatch.setattr(WorkerRunner, "run", fake_run)
+    monkeypatch.setattr(PipelineWorker, "queue_frame", fake_queue)
+    monkeypatch.setattr(webrtc, "SmallWebRTCTransport", Spy)
+    monkeypatch.setattr(pipeline_module, "_RUN_TASK", None)
+
+    async def scenario() -> None:
+        assert (await start_local_pipeline())["ok"] is True
+        await pipeline_module._RUN_TASK
+        worker = built["worker"]
+
+        def collect(p):
+            yield p
+            for child in getattr(p, "processors", []):
+                yield from collect(child)
+
+        procs = {type(p).__name__: p for p in collect(worker.pipeline)}
+        names = [type(p).__name__ for p in collect(worker.pipeline)]
+        assert names.index("OpenAILLMService") < names.index("ElevenLabsTTSService")
+        assert names.index("SmallWebRTCOutputTransport") < names.index("LLMAssistantAggregator")
+
+        # voice profile reaches the LLM; smart turn drives end-of-speech
+        assert procs["OpenAILLMService"]._settings.system_instruction == "Speak like a pirate."
+        stop = procs["LLMUserAggregator"]._user_turn_controller._user_turn_strategies.stop
+        assert [type(s).__name__ for s in stop] == ["TurnAnalyzerUserTurnStopStrategy"]
+
+        # greeting on connect
+        await built["transport"]._call_event_handler("on_client_connected", None)
+        await asyncio.sleep(0.05)  # Pipecat runs event handlers as tasks
+        assert [f.text for f in queued if isinstance(f, TTSSpeakFrame)] == ["Ahoy!"]
+
+        # guardrail: silence gets "Are you still there?"
+        queued.clear()
+        await procs["LLMUserAggregator"]._call_event_handler("on_user_turn_idle")
+        await asyncio.sleep(0.05)
+        assert [f.text for f in queued] == [pipeline_module.vb.IDLE_PROMPT]
+
+        # guardrail: a turn with no words gets "say it again"; a turn with words does not
+        queued.clear()
+        agg = procs["LLMUserAggregator"]
+        await agg._call_event_handler("on_user_turn_stopped", None, type("M", (), {"content": ""})())
+        await agg._call_event_handler("on_user_turn_stopped", None, type("M", (), {"content": "hi"})())
+        await asyncio.sleep(0.05)
+        assert [f.text for f in queued] == [pipeline_module.vb.NOT_UNDERSTOOD]
+
+        # guardrail: errors get an apology, the third ends the call
+        queued.clear()
+        for _ in range(3):
+            await worker._call_event_handler("on_pipeline_error", ErrorFrame(error="boom"))
+        await asyncio.sleep(0.05)
+        spoken = [f.text for f in queued if isinstance(f, TTSSpeakFrame)]
+        assert spoken[:2] == [pipeline_module.vb.ERROR_REPLY] * 2
+        assert spoken[2] == pipeline_module.vb.ERROR_GOODBYE
+        assert isinstance(queued[-1], EndFrame)
+
+    asyncio.run(scenario())

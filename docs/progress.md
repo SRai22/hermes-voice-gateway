@@ -33,10 +33,14 @@
 - Stage 2: `voice_check_call_status` (Twilio REST lookup by call SID or callback id) and `voice_propose_callback` plus the human-only `/voice-callback list|show|approve|deny` command. Approval dials through Twilio; the callee's answer hits the signed `/voice/outbound` webhook, which opens the same media pipeline with an opening message for Hermes.
 - Fixed from reading Hermes' dispatcher: tool handlers are now `handler(args: dict, **kwargs) -> JSON string`; tool names use underscores (`voice_*`) because model APIs reject dots.
 
+- Call behaviour, local pipeline only (`voice_behavior.py` + `pipeline.py`): greeting on connect (`VOICE_GREETING`), voice profile file (`VOICE_PROFILE_PATH`, default `<HERMES_HOME>/voice/PROFILE.md`), explicit smart-turn end-of-speech (LocalSmartTurnAnalyzerV3), guardrails (empty-turn "say again", idle prompt then hang-up, 3 pipeline errors then goodbye). Assistant aggregator moved after `transport.output()` so the context records what was spoken. Verified with pipecat 1.15.0 in a scratch venv: 79 tests pass on both versions.
+
 ## In progress
 - Waiting on a real call test (needs Hermes + Twilio + a public URL); see docs/checks.md
 
 ## Up next (one piece at a time)
+- Port greeting, profile, smart turn and guardrails into the Twilio adapter. Differences: Hermes is the LLM there, so the profile must reach Hermes (ephemeral/channel prompt), the adapter has no user aggregator yet (smart turn needs one, or a turn-stop strategy on the relay), and idle detection must not fire while Hermes is still thinking
+- Pipecat stays pinned to 1.7.x. Call behaviour verified on both 1.7.0 and 1.15.0 (79 tests each). The empty-turn guardrail uses `on_user_turn_stopped` (EmptyUserTurnConfig is 1.15-only)
 - Answering-machine detection for callbacks; Twilio status callbacks to update stored status
 - Barge-in (caller interrupts Hermes mid-sentence) is not handled yet
 
