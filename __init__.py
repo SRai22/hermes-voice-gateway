@@ -1,8 +1,8 @@
 """Hermes Voice Gateway plugin: ``register(ctx)`` entry point.
 
-Registers a ``voice`` platform (Twilio phone calls, see ``adapter.py``), two
-call tools, the ``/voice-callback`` approval command, a local dev-pipeline tool,
-and a ``pre_tool_call`` guard.
+Registers a ``voice`` platform (Twilio phone calls, see ``adapter.py``), operator
+call tools, restricted caller inventory/enquiry tools, the ``/voice-callback``
+approval command, a local dev-pipeline tool, and a ``pre_tool_call`` guard.
 Nothing here imports Hermes internals, Pipecat or Twilio at load time.
 """
 from __future__ import annotations
@@ -11,8 +11,11 @@ import importlib.util
 import logging
 
 from ._env import secret
+from . import caller_tools
 from .hooks import on_pre_tool_call
 from .schemas import (
+    CALLER_ENQUIRY_SCHEMA,
+    CALLER_INVENTORY_SCHEMA,
     CHECK_STATUS_SCHEMA,
     LOCAL_PIPELINE_SCHEMA,
     PROPOSE_CALLBACK_SCHEMA,
@@ -103,6 +106,23 @@ def register(ctx):
         description="Review, approve or deny callbacks the agent proposed (nothing dials until approved).",
         args_hint="list | show <id> | approve <id> | deny <id>",
     )
+    ctx.register_tool(
+        name="voice_search_inventory",
+        toolset=caller_tools.TOOLSET,
+        schema=CALLER_INVENTORY_SCHEMA,
+        handler=caller_tools.search_inventory,
+        description="Search the saved laptop inventory snapshot. Prices and availability require sales confirmation.",
+    )
+    ctx.register_tool(
+        name="voice_save_enquiry",
+        toolset=caller_tools.TOOLSET,
+        schema=CALLER_ENQUIRY_SCHEMA,
+        handler=caller_tools.save_enquiry,
+        description=(
+            "Save one confirmed enquiry for this live caller after explicit consent. "
+            "Ownership is gateway-bound. No team is notified and no callback is approved or scheduled."
+        ),
+    )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
 
-    logger.info("hermes-voice-gateway registered (voice platform, 3 tools, 1 command, 1 hook)")
+    logger.info("hermes-voice-gateway registered (voice platform, 5 tools, 1 command, 1 hook)")

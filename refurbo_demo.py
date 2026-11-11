@@ -1,7 +1,8 @@
-"""Opt-in, local-browser-only Refurbo demo. Never notifies sales or dials a phone.
+"""Opt-in local-browser Refurbo demo plus a reusable offline inventory search.
 
 Inventory is a stale snapshot, not a stock/policy guarantee. Demo appointments
-are local SQLite records, not calendar bookings. No Hermes tools are registered.
+are local SQLite records, not calendar bookings. The phone caller tools reuse
+only the pure search helper; this module never notifies sales or dials a phone.
 """
 from __future__ import annotations
 

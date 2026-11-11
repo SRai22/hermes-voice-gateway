@@ -7,6 +7,7 @@ import importlib.util
 import sqlite3
 import sys
 import types
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,6 +88,9 @@ class FakeBase:
 
     def prepare_tts_text(self, text):
         return text.strip()
+
+    def _media_delivery_scope(self, source):
+        return nullcontext()
 
     def _set_fatal_error(self, code, msg, retryable=False):
         self.fatal = (code, msg, retryable)

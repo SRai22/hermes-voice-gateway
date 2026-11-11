@@ -9,6 +9,7 @@ The repo root **is** the plugin package (flat modules, relative imports). Hermes
 - `adapter.py`: Twilio call server (`/voice`, `/voice/outbound`, `/media`) and Hermes platform adapter.
 - `callbacks.py`: callback proposals + `/voice-callback` operator approval; state in the plugin SQLite file.
 - `tools.py` / `schemas.py`: agent tools (`voice_propose_callback`, `voice_check_call_status`, `voice_start_local_pipeline`) and their schemas.
+- `caller_tools.py`: restricted `voice_caller` search/enquiry handlers, live-turn permissions and SQLite enquiries. Call ownership comes from gateway context, never model arguments.
 - `hooks.py`: `pre_tool_call` guard. `_env.py`: read config/secrets here, not via raw `os.getenv`.
 - `twilio_util.py` (pure: signatures, TwiML, allowlist, stream tokens), `twilio_rest.py` (stdlib REST client, blocking: use `asyncio.to_thread`).
 - `voice_behavior.py`: greeting/profile/guardrails shared by adapter and local pipeline. Plain Python, no Pipecat import.
@@ -44,6 +45,7 @@ The repo root **is** the plugin package (flat modules, relative imports). Hermes
 - `VOICE_REFURBO_DEMO=true` enables local inventory/appointment tools only; it does not add them to the Twilio caller path. Demo appointments persist locally and do not reserve real slots or notify anyone; see `docs/refurbo-demo.md`.
 
 ## Security rules (do not weaken)
+- Phone toolsets must resolve to exactly `voice_search_inventory` and `voice_save_enquiry`; retain the adapter's policy check, deny-by-default caller hook and handler authorization. Revoke grants on every terminal path. Other plugin/MCP/context tools must not expand the caller surface; see README policy prerequisites and `tests/test_caller_tools.py`.
 - Agents may only *propose* callbacks; there is deliberately no agent-callable approve tool, and spoken words never run `/commands`.
 - Twilio webhooks are signature-checked; `VOICE_INSECURE_NO_SIGNATURE` is local-dev only. Callers must be on `VOICE_ALLOWED_USERS` (or explicit `VOICE_ALLOW_ALL_USERS=true`); the allowlist is a filter, not authentication.
 - Never log or commit secrets (`TWILIO_*`, `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`); `.env` is local only (use `.env.example`). Don't log caller transcripts above DEBUG.
