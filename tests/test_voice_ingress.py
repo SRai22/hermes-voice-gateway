@@ -10,12 +10,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _hermes_stubs import load_adapter_module
+from _hermes_stubs import load_adapter_module, use_memory_db
 
 
 @pytest.fixture()
 def ingress(monkeypatch):
     mod = load_adapter_module()
+    use_memory_db(monkeypatch)
+    monkeypatch.setattr(mod.caller_tools, "verify_tool_surface", lambda: None)
     adapter = mod.VoiceAdapter(config=object())
     call = mod._Call(caller="+15550001111", call_sid="CA-ingress")
     adapter._calls[call.caller] = call

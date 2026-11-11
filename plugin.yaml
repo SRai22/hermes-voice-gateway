@@ -61,6 +61,8 @@ provides_tools:
   - voice_propose_callback
   - voice_check_call_status
   - voice_start_local_pipeline
+  - voice_search_inventory
+  - voice_save_enquiry
 provides_hooks:
   - pre_tool_call
 python_dependencies:

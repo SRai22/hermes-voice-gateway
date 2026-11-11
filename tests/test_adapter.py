@@ -46,6 +46,8 @@ def make(monkeypatch):
         for k, v in {**ENV, **overrides}.items():
             monkeypatch.setenv(k, v)
         mod = load_adapter_module()
+        use_memory_db(monkeypatch)
+        monkeypatch.setattr(mod.caller_tools, "verify_tool_surface", lambda: None)
         adapter = mod.VoiceAdapter(config=object())
         return adapter, TestClient(adapter._build_app())
 
@@ -245,7 +247,8 @@ def test_call_profile_is_snapshotted_and_sent_without_changing_transcript(make, 
 
     asyncio.run(run())
     assert [e.text for e in adapter.handled] == ["  /reset  ", "callback purpose"]
-    assert all(e.channel_prompt == "Speak as the appointment receptionist." for e in adapter.handled)
+    assert all(e.channel_prompt.startswith("Speak as the appointment receptionist.\n\n") for e in adapter.handled)
+    assert all(mod.caller_tools.CALLER_INSTRUCTIONS in e.channel_prompt for e in adapter.handled)
     assert all(e.allow_gateway_control is False for e in adapter.handled)
     assert mod._Call(caller=CALLER, call_sid="next").profile == "Changed for the next call."
 
@@ -449,7 +452,7 @@ def test_inbound_greeting_and_outbound_hermes_first(exercise_call, greeting):
         assert not any(isinstance(f, TTSSpeakFrame) for f in s["frames"])
         event, = s["adapter"].handled
         assert event.text == "Approved callback purpose"
-        assert event.channel_prompt == s["call"].profile
+        assert event.channel_prompt.startswith(s["call"].profile + "\n\n")
 
     asyncio.run(exercise_call(inbound, VOICE_GREETING=greeting))
     asyncio.run(exercise_call(outbound, opening="Approved callback purpose", VOICE_GREETING=greeting))

@@ -20,6 +20,7 @@ functions' annotations, and the request/WebSocket types are imported locally.
 import asyncio
 import json
 import logging
+import sqlite3
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,6 +29,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 
+from . import caller_tools
 from ._env import secret
 from . import voice_behavior as vb
 from .callbacks import ID_RE, clean_text, open_store
@@ -67,6 +69,7 @@ class _Call:
     pending_events: set[str] = field(default_factory=set)
     event_outcomes: dict[str, str] = field(default_factory=dict)
     relay_tasks: set[asyncio.Task] = field(default_factory=set)
+    tool_grants: dict[str, tuple[caller_tools.CallerIdentity, Any]] = field(default_factory=dict)
     queued_speech: int = 0
     bot_speaking: bool = False
     idle_enabled: bool = True
@@ -257,6 +260,13 @@ class VoiceAdapter(BasePlatformAdapter):
             return
         call.pending_events.remove(event_id)
         call.event_outcomes[event_id] = outcome
+        if grant := call.tool_grants.pop(event_id, None):
+            identity, source = grant
+            try:
+                with self._media_delivery_scope(source):
+                    caller_tools.revoke_turn(identity)
+            except (OSError, sqlite3.Error):
+                logger.warning("[voice] caller grant database revoke failed; local permission is closed")
         if call.ending or self._ingress_stopping:
             return  # a dead transport must not hold teardown behind idle frames
         if outcome == "failure":
@@ -275,6 +285,10 @@ class VoiceAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
+
+    def toolsets_for_source(self, source) -> list[str]:
+        # Never return []/None: Hermes treats those as the platform default.
+        return list(caller_tools.TOOLSET_SELECTION)
 
     # -- HTTP / WebSocket server --------------------------------------------
 
@@ -611,7 +625,7 @@ class VoiceAdapter(BasePlatformAdapter):
             source=source,
             message_id=event_id,
             allow_gateway_control=False,  # a spoken phrase must never run /commands
-            channel_prompt=call.profile,
+            channel_prompt=f"{call.profile}\n\n{caller_tools.CALLER_INSTRUCTIONS}",
         )
         call.pending_events.add(event_id)
 
@@ -628,6 +642,15 @@ class VoiceAdapter(BasePlatformAdapter):
                     if call.ending or self._ingress_stopping:
                         await self._settle_event(call, event_id, "cancelled")
                         return
+                    with self._media_delivery_scope(event.source):
+                        caller_tools.verify_tool_surface()
+                        identity = caller_tools.CallerIdentity(key, call.caller, call.call_sid, event_id)
+                        caller_tools.grant_turn(
+                            identity, ttl=_INGRESS_WAIT_SECONDS,
+                            is_active=lambda: not call.ending and not self._ingress_stopping
+                            and self._calls.get(call.caller) is call and event_id in call.pending_events,
+                        )
+                    call.tool_grants[event_id] = identity, event.source
                     await self.handle_message(event)
                     # False is unambiguous ONLY here: no busy owner could absorb
                     # the event. A completion racing admission is already settled.

@@ -1,5 +1,5 @@
 # hermes-voice-gateway
-Hermes Voice Gateway connects your business phone line to Hermes. It answers calls, uses the tools your team already works with, and makes approved callbacks.
+Hermes Voice Gateway connects your business phone line to Hermes. It answers calls, offers a restricted inventory/enquiry workflow, and makes operator-approved callbacks.
 
 ## Status
 Inbound calls, operator-approved callbacks and call-status lookup are built. A real inbound Twilio call through the running Hermes gateway has been confirmed working by the project maintainer. The local WebRTC pipeline has passed real ElevenLabs/OpenAI audio checks. The adapter has also passed real ElevenLabs audio over a local Twilio-format WebSocket with a simulated Hermes lifecycle, plus regression tests.
@@ -29,6 +29,18 @@ There is deliberately no agent-callable approve tool, and spoken words cannot ru
 
 Needs `TWILIO_PHONE_NUMBER` in addition to the inbound settings.
 
+## Caller inventory and enquiries
+Phone turns can use only `voice_search_inventory` and `voice_save_enquiry`. The adapter overrides the caller toolsets with `voice_caller` and `no_mcp`; shell, file, browser, delegation, execution wrappers, connectors, callback/status tools and local-pipeline startup are not caller permissions. Operator-side callback tools and `/voice-callback` approval remain separate.
+
+- Inventory search reads the packaged `voice/refurbo-inventory.json` snapshot, returns source URLs and caveats, and caps each response at five products. Model/title, maximum INR budget and minimum RAM/SSD filters are optional. There is no caller-controlled path or live-stock API.
+- Saving requires a confirmed name, requirements and explicit `consent=true` to storing the enquiry with the current caller number. Unknown model, budget, RAM or SSD fields should be omitted. The caller cannot supply a different phone number, Call SID, database path or enquiry owner.
+- Enquiries are plaintext SQLite records in `<HERMES_HOME>/plugin-data/hermes-voice-gateway/data.db`, table `voice_enquiries`. One enquiry is saved per call: identical retries return the same ID; changed details are refused rather than silently replacing the record. The response confirms local storage only: no team is notified, no slot is reserved and no callback is approved or scheduled. Operator viewing/handling is a separate follow-up feature.
+- Both handlers require matching task-bound gateway session/caller/thread/message identity, a bounded database grant and a live call in the admitting gateway process. Permissions close on completion, rejection, timeout, cancellation or hangup. Environment-only identities, stale calls and worker/host processes without the live grant are denied. Treat caller ID as unverified, not proof of a person's identity. Do not collect payment credentials or other sensitive data in enquiries.
+
+**Runtime policy prerequisite:** Hermes can automatically append other installed plugin toolsets, context-engine tools or tool-search wrappers even after a platform override. Before each caller turn, the plugin checks the resolved tool definitions and refuses inference unless they are exactly the two caller tools. The pre-tool hook also explicitly denies all other tool names and denies permission-check errors; handler checks remain mandatory even for direct dispatch.
+
+In the active Hermes profile, save a Voice tool selection containing only `voice_caller`, with MCP disabled. `known_plugin_toolsets.voice` must include the omitted installed plugin toolsets (including `voice`) so Hermes does not add them by default. For a profile with only this plugin, that list is `[voice, voice_caller]`. Additional plugin toolsets must also be marked known-and-omitted for Voice. Context-engine additions and tool-search deferral must not broaden/replace the two exposed tool names. Use Hermes' tools/configuration interfaces; this plugin does not rewrite profile settings. Misconfiguration produces a caller-policy error in gateway logs and fails closed. This policy/context integration is checked against the installed Hermes APIs and must be reverified on runtime upgrades.
+
 ## Speech recognition
 Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local development pipeline. Silero VAD detects the end of each spoken segment, then the audio is uploaded for transcription. Pause after speaking to let Hermes respond; this is segmented HTTP transcription, not the realtime WebSocket API. Each call owns an HTTP session that closes when the call ends or setup fails.
 
@@ -46,7 +58,7 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 ## Call behaviour (local pipeline and Twilio adapter)
 - **Greeting**: the agent speaks first when a call connects. `VOICE_GREETING` overrides the text; `off` disables it.
 - **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) supplies short-reply, speakable instructions. If missing or empty, a built-in profile is used. Locally it is the OpenAI system instruction; the adapter snapshots it per call and supplies it to Hermes through `channel_prompt`, without changing the caller's transcript or replacing Hermes' own safety instructions.
-- **Caller-profile template**: [`voice/PROFILE.md`](voice/PROFILE.md) is a Refurbo first-contact laptop-sales demo with requirements intake, a sourced shortlist, privacy rules, and a clear separation between simulated appointments and real operator-approved callbacks. Copy it to the profile location above or set `VOICE_PROFILE_PATH` to its absolute path; the repo file is not loaded automatically. Separately enforce caller tool permissions; a prompt is not an access-control boundary. Profiles are truncated at 6,000 characters. Set `VOICE_GREETING` separately to an AI/demo-disclosing opening because the gateway's fixed greeting is not generated from the profile.
+- **Caller-profile template**: [`voice/PROFILE.md`](voice/PROFILE.md) is a Refurbo first-contact laptop-sales demo with requirements intake, a sourced shortlist, privacy rules, and a clear separation between simulated appointments and real operator-approved callbacks. Copy it to the profile location above or set `VOICE_PROFILE_PATH` to its absolute path; the repo file is not loaded automatically. The caller tool allowlist is enforced independently of this profile; a prompt is not an access-control boundary. Profiles are truncated at 6,000 characters. Phone turns append inventory/enquiry instructions, not the local demo's appointment tools. Set `VOICE_GREETING` separately to an AI/demo-disclosing opening because the gateway's fixed greeting is not generated from the profile.
 - **Smart turn**: Pipecat's local smart-turn model decides from the audio when the caller has finished, instead of replying after any pause.
 - **Guardrails**: a turn with no recognised words makes the agent ask the caller to repeat (up to twice in a row); silence gets "Are you still there?" and then a hang-up; three pipeline errors in one call end it with an apology.
 - **Adapter timing**: one completed smart turn becomes one Hermes message. Idle detection pauses while Hermes is processing and while speech is queued or playing. Outbound callbacks retain their approved-purpose, Hermes-first opening instead of speaking a second generic greeting.
@@ -60,6 +72,8 @@ Use **Pipecat 1.7.0 exactly**, not a floating 1.7.x or 1.15.x release. Both depe
 
 ## Tests
 `pytest tests` from the repo root.
+
+Caller permission coverage is in `tests/test_caller_tools.py`: exact tool selection, invalid/owner-overriding arguments, missing/cross-call/expired context, grant revocation, concurrent idempotent saves and committed readback. An offline check against the installed Hermes runtime also exercised real plugin registration, gateway lifecycle, tool dispatch and registered hooks; agent-loop validation rejected delegation before execution. Model decisions and audio were simulated, not a live phone or provider test.
 
 ## Refurbo sales demo
 

@@ -35,11 +35,16 @@ def test_register_wires_platform_tools_and_hook(monkeypatch) -> None:
     assert sorted(t[0] for t in ctx.tools) == [
         "voice_check_call_status",
         "voice_propose_callback",
+        "voice_save_enquiry",
+        "voice_search_inventory",
         "voice_start_local_pipeline",
     ]
     assert ctx.hooks == [("pre_tool_call", "on_pre_tool_call")]
     assert ctx.commands == [("voice-callback", "callback_command")]
     assert not any("approve" in t[0] for t in ctx.tools)  # approval is human-only, never a tool
+    assert {name for name, toolset, _ in ctx.tools if toolset == "voice_caller"} == {
+        "voice_search_inventory", "voice_save_enquiry",
+    }
     (platform,) = ctx.platforms
     assert platform["name"] == "voice"
     assert platform["allowed_users_env"] == "VOICE_ALLOWED_USERS"
