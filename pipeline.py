@@ -206,13 +206,25 @@ async def start_local_pipeline() -> dict:
     )
 
     # --- OpenAI LLM (settings pattern, avoids deprecation warning) ---
+    # Local-browser opt-in only: never registers Hermes tools or changes callbacks.
+    demo = None
+    system_instruction = vb.load_profile()
+    if os.environ.get("VOICE_REFURBO_DEMO", "").strip().lower() == "true":
+        try:
+            from . import refurbo_demo as demo
+        except ImportError:
+            import refurbo_demo as demo
+        system_instruction += demo.system_context()
     llm = OpenAILLMService(
         api_key=openai_key,
         settings=OpenAILLMSettings(
             model=llm_model,
-            system_instruction=vb.load_profile(),
+            system_instruction=system_instruction,
         ),
     )
+
+    if demo is not None:
+        context.set_tools(demo.register_tools(llm))
 
     # --- WebRTC connection + transport ---
     connection_id = str(uuid.uuid4())

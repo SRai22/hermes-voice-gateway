@@ -2,7 +2,7 @@
 Hermes Voice Gateway connects your business phone line to Hermes. It answers calls, uses the tools your team already works with, and makes approved callbacks.
 
 ## Status
-Inbound calls, operator-approved callbacks and call-status lookup are built. The local WebRTC pipeline has passed real ElevenLabs/OpenAI audio checks. The adapter has passed real ElevenLabs audio over a local Twilio-format WebSocket with a simulated Hermes lifecycle, plus regression tests. A real Twilio call through the running Hermes gateway is still unverified.
+Inbound calls, operator-approved callbacks and call-status lookup are built. A real inbound Twilio call through the running Hermes gateway has been confirmed working by the project maintainer. The local WebRTC pipeline has passed real ElevenLabs/OpenAI audio checks. The adapter has also passed real ElevenLabs audio over a local Twilio-format WebSocket with a simulated Hermes lifecycle, plus regression tests.
 
 ## How a call works
 Twilio -> `POST <VOICE_WEBHOOK_URL>/voice` (signature checked) -> TwiML opens a media stream to `/media` -> ElevenLabs speech-to-text -> the transcript goes to Hermes as a normal message from the caller's number -> Hermes' reply is spoken with ElevenLabs.
@@ -46,6 +46,7 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 ## Call behaviour (local pipeline and Twilio adapter)
 - **Greeting**: the agent speaks first when a call connects. `VOICE_GREETING` overrides the text; `off` disables it.
 - **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) supplies short-reply, speakable instructions. If missing or empty, a built-in profile is used. Locally it is the OpenAI system instruction; the adapter snapshots it per call and supplies it to Hermes through `channel_prompt`, without changing the caller's transcript or replacing Hermes' own safety instructions.
+- **Caller-profile template**: [`voice/PROFILE.md`](voice/PROFILE.md) is a Refurbo first-contact laptop-sales demo with requirements intake, a sourced shortlist, privacy rules, and a clear separation between simulated appointments and real operator-approved callbacks. Copy it to the profile location above or set `VOICE_PROFILE_PATH` to its absolute path; the repo file is not loaded automatically. Separately enforce caller tool permissions; a prompt is not an access-control boundary. Profiles are truncated at 6,000 characters. Set `VOICE_GREETING` separately to an AI/demo-disclosing opening because the gateway's fixed greeting is not generated from the profile.
 - **Smart turn**: Pipecat's local smart-turn model decides from the audio when the caller has finished, instead of replying after any pause.
 - **Guardrails**: a turn with no recognised words makes the agent ask the caller to repeat (up to twice in a row); silence gets "Are you still there?" and then a hang-up; three pipeline errors in one call end it with an apology.
 - **Adapter timing**: one completed smart turn becomes one Hermes message. Idle detection pauses while Hermes is processing and while speech is queued or playing. Outbound callbacks retain their approved-purpose, Hermes-first opening instead of speaking a second generic greeting.
@@ -57,3 +58,9 @@ Use **Pipecat 1.7.0 exactly**, not a floating 1.7.x or 1.15.x release. Both depe
 
 ## Tests
 `pytest tests` from the repo root.
+
+## Refurbo sales demo
+
+See [`docs/refurbo-demo.md`](docs/refurbo-demo.md) for the first-contact flow and recording checklist. [`voice/refurbo-inventory.json`](voice/refurbo-inventory.json) contains 410 distinct sourced laptop-card listings captured across nine category pages, including approximate enquiry prices that must not be presented as checkout quotes. It is a snapshot, not live stock.
+
+The opt-in local demo uses `VOICE_REFURBO_DEMO=true` for inventory search and simulated appointment persistence. It does not notify Refurbo, reserve real calendar slots, or place calls. With demo tools disabled, the profile alone cannot save appointments. This does not add the demo CRM tools to the Hermes/Twilio caller path or change human approval for real callbacks.

@@ -110,7 +110,8 @@ def test_disconnect_unblocks_an_end_frame_already_draining(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("demo_enabled", [False, True])
+def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tmp_path, demo_enabled) -> None:
     """Needs pipecat installed. Builds the real pipeline (no network) and fires its handlers."""
     pytest.importorskip("pipecat")
     from pipecat.frames.frames import EndFrame, ErrorFrame, TTSSpeakFrame
@@ -123,6 +124,8 @@ def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tm
     monkeypatch.setenv("VOICE_GREETING", "Ahoy!")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("VOICE_REFURBO_DEMO", "true" if demo_enabled else "false")
+    monkeypatch.setenv("VOICE_REFURBO_DEMO_DB", str(tmp_path / "demo.db"))
 
     built, queued = {}, []
 
@@ -162,7 +165,44 @@ def test_pipeline_has_greeting_profile_smart_turn_and_guardrails(monkeypatch, tm
         assert names.index("SmallWebRTCOutputTransport") < names.index("LLMAssistantAggregator")
 
         # voice profile reaches the LLM; smart turn drives end-of-speech
-        assert procs["OpenAILLMService"]._settings.system_instruction == "Speak like a pirate."
+        llm = procs["OpenAILLMService"]
+        instruction = llm._settings.system_instruction
+        if demo_enabled:
+            from pipecat.services.llm_service import FunctionCallParams
+            from datetime import datetime, timedelta, timezone
+            assert "Asia/Kolkata" in instruction
+            assert "SIMULATION ONLY" in instruction
+            assert instruction.startswith("Speak like a pirate.")
+            context = procs["LLMUserAggregator"]._context
+            tools = context.tools.standard_tools
+            assert {t.name for t in tools} == {"refurbo_search_inventory", "refurbo_book_appointment"}
+            assert "consent" in next(t for t in tools if t.name == "refurbo_book_appointment").required
+            results = []
+
+            async def receive(result, *, properties=None):
+                results.append(result)
+
+            async def invoke(name, args):
+                await llm._functions[name].handler(FunctionCallParams(
+                    function_name=name, tool_call_id="call-1", arguments=args,
+                    llm=llm, pipeline_worker=worker, context=context, result_callback=receive))
+
+            await invoke("refurbo_search_inventory", {"model": "T14", "limit": 2})
+            assert results[-1]["ok"] and results[-1]["products"]
+            await invoke("refurbo_book_appointment", dict(
+                name="Demo Buyer", phone="+919876543210", consent=True,
+                appointment_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                budget_inr=40000, model="T14", ram_gb=16, ssd_gb=256,
+                use_case="Office", idempotency_key="pipeline-test"))
+            assert results[-1]["ok"] and results[-1]["simulation"]
+            await invoke("refurbo_book_appointment", {})
+            assert results[-1]["ok"] is False
+            await invoke("refurbo_search_inventory", {"inventory_path": "/not-allowed"})
+            assert results[-1] == {"ok": False, "error": "Unknown tool argument"}
+        else:
+            assert instruction == "Speak like a pirate."
+            assert "refurbo_search_inventory" not in llm._functions
+            assert "refurbo_book_appointment" not in llm._functions
         stop = procs["LLMUserAggregator"]._user_turn_controller._user_turn_strategies.stop
         assert [type(s).__name__ for s in stop] == ["TurnAnalyzerUserTurnStopStrategy"]
 

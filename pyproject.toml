@@ -30,6 +30,8 @@ only-include = [
     "tools.py",
     "hooks.py",
     "pipeline.py",
+    "refurbo_demo.py",
+    "voice/refurbo-inventory.json",
     "voice_behavior.py",
     "adapter.py",
     "twilio_util.py",
