@@ -2,7 +2,7 @@
 Hermes Voice Gateway connects your business phone line to Hermes. It answers calls, offers a restricted inventory/enquiry workflow, and makes operator-approved callbacks.
 
 ## Status
-Inbound calls, operator-approved callbacks and call-status lookup are built. A real inbound Twilio call through the running Hermes gateway has been confirmed working by the project maintainer. The local WebRTC pipeline has passed real ElevenLabs/OpenAI audio checks. The adapter has also passed real ElevenLabs audio over a local Twilio-format WebSocket with a simulated Hermes lifecycle, plus regression tests.
+Early-stage (v0.2). Inbound calls, operator-approved callbacks and call-status lookup are implemented, with a local browser pipeline for development. Not production-hardened: it has not been load-tested or verified at scale, and the limits below apply.
 
 ## How a call works
 Twilio -> `POST <VOICE_WEBHOOK_URL>/voice` (signature checked) -> TwiML opens a media stream to `/media` -> ElevenLabs speech-to-text -> the transcript goes to Hermes as a normal message from the caller's number -> Hermes' reply is spoken with ElevenLabs.
@@ -32,7 +32,7 @@ Needs `TWILIO_PHONE_NUMBER` in addition to the inbound settings.
 ## Caller inventory and enquiries
 Phone turns can use only `voice_search_inventory` and `voice_save_enquiry`. The adapter overrides the caller toolsets with `voice_caller` and `no_mcp`; shell, file, browser, delegation, execution wrappers, connectors, callback/status tools and local-pipeline startup are not caller permissions. Operator-side callback tools and `/voice-callback` approval remain separate.
 
-- Inventory search reads the packaged `voice/refurbo-inventory.json` snapshot, returns source URLs and caveats, and caps each response at five products. Model/title, maximum INR budget and minimum RAM/SSD filters are optional. There is no caller-controlled path or live-stock API.
+- Inventory search reads a packaged sample inventory snapshot (see [Demo data](#demo-data)), returns source URLs and caveats, and caps each response at five products. Model/title, maximum INR budget and minimum RAM/SSD filters are optional. There is no caller-controlled path or live-stock API.
 - Saving requires a confirmed name, requirements and explicit `consent=true` to storing the enquiry with the current caller number. Unknown model, budget, RAM or SSD fields should be omitted. The caller cannot supply a different phone number, Call SID, database path or enquiry owner.
 - Enquiries are plaintext SQLite records in `<HERMES_HOME>/plugin-data/hermes-voice-gateway/data.db`, table `voice_enquiries`. One enquiry is saved per call: identical retries return the same ID; changed details are refused rather than silently replacing the record. The response confirms local storage only: no team is notified, no slot is reserved and no callback is approved or scheduled. Operator viewing/handling is a separate follow-up feature.
 - Both handlers require matching task-bound gateway session/caller/thread/message identity, a bounded database grant and a live call in the admitting gateway process. Permissions close on completion, rejection, timeout, cancellation or hangup. Environment-only identities, stale calls and worker/host processes without the live grant are denied. Treat caller ID as unverified, not proof of a person's identity. Do not collect payment credentials or other sensitive data in enquiries.
@@ -58,7 +58,7 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 ## Call behaviour (local pipeline and Twilio adapter)
 - **Greeting**: the agent speaks first when a call connects. `VOICE_GREETING` overrides the text; `off` disables it.
 - **Voice profile**: `<HERMES_HOME>/voice/PROFILE.md` (or `VOICE_PROFILE_PATH`) supplies short-reply, speakable instructions. If missing or empty, a built-in profile is used. Locally it is the OpenAI system instruction; the adapter snapshots it per call and supplies it to Hermes through `channel_prompt`, without changing the caller's transcript or replacing Hermes' own safety instructions.
-- **Caller-profile template**: [`voice/PROFILE.md`](voice/PROFILE.md) is a Refurbo first-contact laptop-sales demo with requirements intake, a sourced shortlist, privacy rules, and a clear separation between simulated appointments and real operator-approved callbacks. Copy it to the profile location above or set `VOICE_PROFILE_PATH` to its absolute path; the repo file is not loaded automatically. The caller tool allowlist is enforced independently of this profile; a prompt is not an access-control boundary. Profiles are truncated at 6,000 characters. Phone turns append inventory/enquiry instructions, not the local demo's appointment tools. Set `VOICE_GREETING` separately to an AI/demo-disclosing opening because the gateway's fixed greeting is not generated from the profile.
+- **Caller-profile template**: [`voice/PROFILE.md`](voice/PROFILE.md) is a sample laptop-sales profile (requirements intake, shortlist, privacy rules). Copy it to the profile location above or set `VOICE_PROFILE_PATH` to its absolute path; the repo file is not loaded automatically. The caller tool allowlist is enforced independently of the profile; a prompt is not an access-control boundary. Profiles are truncated at 6,000 characters. Set `VOICE_GREETING` separately to an opening that discloses the caller is talking to an AI, because the gateway's fixed greeting is not generated from the profile.
 - **Smart turn**: Pipecat's local smart-turn model decides from the audio when the caller has finished, instead of replying after any pause.
 - **Guardrails**: a turn with no recognised words makes the agent ask the caller to repeat (up to twice in a row); silence gets "Are you still there?" and then a hang-up; three pipeline errors in one call end it with an apology.
 - **Adapter timing**: one completed smart turn becomes one Hermes message. Idle detection pauses while Hermes is processing and while speech is queued or playing. Outbound callbacks retain their approved-purpose, Hermes-first opening instead of speaking a second generic greeting.
@@ -73,10 +73,10 @@ Use **Pipecat 1.7.0 exactly**, not a floating 1.7.x or 1.15.x release. Both depe
 ## Tests
 `pytest tests` from the repo root.
 
-Caller permission coverage is in `tests/test_caller_tools.py`: exact tool selection, invalid/owner-overriding arguments, missing/cross-call/expired context, grant revocation, concurrent idempotent saves and committed readback. An offline check against the installed Hermes runtime also exercised real plugin registration, gateway lifecycle, tool dispatch and registered hooks; agent-loop validation rejected delegation before execution. Model decisions and audio were simulated, not a live phone or provider test.
+Tests simulate the model and audio; they are not a live phone or provider test. Caller-permission coverage is in `tests/test_caller_tools.py`.
 
-## Refurbo sales demo
+## Demo data
+The opt-in local demo (`VOICE_REFURBO_DEMO=true`) uses a sample laptop-store inventory snapshot ([`voice/refurbo-inventory.json`](voice/refurbo-inventory.json)) and simulated appointments stored locally. The snapshot is demo data only: not live stock, and its prices are approximate and not quotes. The demo does not notify anyone, reserve real calendar slots or place calls, and does not change human approval for real callbacks. See [`docs/refurbo-demo.md`](docs/refurbo-demo.md).
 
-See [`docs/refurbo-demo.md`](docs/refurbo-demo.md) for the first-contact flow and recording checklist. [`voice/refurbo-inventory.json`](voice/refurbo-inventory.json) contains 410 distinct sourced laptop-card listings captured across nine category pages, including approximate enquiry prices that must not be presented as checkout quotes. It is a snapshot, not live stock.
-
-The opt-in local demo uses `VOICE_REFURBO_DEMO=true` for inventory search and simulated appointment persistence. It does not notify Refurbo, reserve real calendar slots, or place calls. With demo tools disabled, the profile alone cannot save appointments. This does not add the demo CRM tools to the Hermes/Twilio caller path or change human approval for real callbacks.
+## License
+MIT. See [LICENSE](LICENSE).
