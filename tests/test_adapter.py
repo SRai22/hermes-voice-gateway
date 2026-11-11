@@ -128,6 +128,50 @@ def test_send_without_active_call_fails_cleanly(make) -> None:
     assert result.success is False
 
 
+@pytest.mark.parametrize("reply_to,metadata", [
+    ("CA-old-1", {"notify": True}),
+    (None, {"notify": True, "thread_id": "CA-old"}),
+    ("CA-old-1", {"notify": True, "thread_id": "CA-new"}),
+    (None, {"notify": True}),
+])
+def test_delayed_or_unscoped_reply_cannot_reach_a_later_call(make, monkeypatch, reply_to, metadata):
+    adapter, _ = make()
+    mod = sys.modules[adapter.__class__.__module__]
+    call = mod._Call(caller=CALLER, call_sid="CA-new", turns=1,
+                     task=types.SimpleNamespace(has_finished=lambda: False))
+    adapter._calls[CALLER] = call
+    spoken = []
+
+    async def say(call, text):
+        spoken.append(text)
+
+    monkeypatch.setattr(adapter, "_say", say)
+    result = asyncio.run(adapter.send(CALLER, "old response", reply_to=reply_to, metadata=metadata))
+    assert not result.success
+    assert spoken == []
+
+
+@pytest.mark.parametrize("notify", [None, False, True])
+def test_only_final_user_replies_are_spoken(make, monkeypatch, notify):
+    adapter, _ = make()
+    mod = sys.modules[adapter.__class__.__module__]
+    call = mod._Call(caller=CALLER, call_sid="CA-current", turns=1,
+                     task=types.SimpleNamespace(has_finished=lambda: False))
+    adapter._calls[CALLER] = call
+    spoken = []
+
+    async def say(call, text):
+        spoken.append(text)
+
+    monkeypatch.setattr(adapter, "_say", say)
+    metadata = {"thread_id": call.call_sid}
+    if notify is not None:
+        metadata["notify"] = notify
+    result = asyncio.run(adapter.send(CALLER, "message", reply_to="CA-current-1", metadata=metadata))
+    assert result.success
+    assert spoken == (["message"] if notify is True else [])
+
+
 def test_send_speaks_on_the_callers_live_pipeline(make, monkeypatch) -> None:
     adapter, _ = make()
     frames_mod = types.ModuleType("pipecat.frames.frames")
@@ -149,7 +193,7 @@ def test_send_speaks_on_the_callers_live_pipeline(make, monkeypatch) -> None:
 
     adapter._calls[CALLER] = sys.modules[adapter.__class__.__module__]._Call(
         caller=CALLER, call_sid="CA1", task=FakeTask())
-    result = asyncio.run(adapter.send(CALLER, "  Hi there  "))
+    result = asyncio.run(adapter.send(CALLER, "  Hi there  ", metadata={"thread_id": "CA1", "notify": True}))
     assert result.success and queued == [("speak", "Hi there")]
     assert asyncio.run(adapter.send("+19990000000", "x")).success is False
     adapter._calls[CALLER].ending = True
@@ -163,9 +207,12 @@ def test_send_speaks_on_the_callers_live_pipeline(make, monkeypatch) -> None:
 def test_transcript_becomes_a_hermes_text_message(make) -> None:
     adapter, _ = make()
     call = sys.modules[adapter.__class__.__module__]._Call(caller=CALLER, call_sid="CA1")
+    adapter._calls[CALLER] = call
 
     async def run():
         adapter._relay_to_hermes(call, "what are your hours")
+        await adapter.wait_for_messages()
+        await adapter.finish_processing(adapter.handled[0])
         await asyncio.gather(*adapter._background_tasks)
 
     asyncio.run(run())
@@ -173,6 +220,7 @@ def test_transcript_becomes_a_hermes_text_message(make) -> None:
     assert event.text == "what are your hours"
     assert event.message_type == "text"  # TEXT so Hermes' own auto-TTS does not double-speak
     assert event.source.chat_id == CALLER
+    assert event.source.thread_id == "CA1"
     assert event.message_id == "CA1-1"
     assert event.allow_gateway_control is False  # spoken words must not run /commands
 
@@ -184,11 +232,15 @@ def test_call_profile_is_snapshotted_and_sent_without_changing_transcript(make, 
     adapter, _ = make()
     mod = sys.modules[adapter.__class__.__module__]
     call = mod._Call(caller=CALLER, call_sid="CA-profile")
+    adapter._calls[CALLER] = call
     profile.write_text("Changed for the next call.")
 
     async def run():
         for text in ("  /reset  ", "callback purpose"):
             adapter._relay_to_hermes(call, text)
+        for count in (1, 2):
+            await adapter.wait_for_messages(count)
+            await adapter.finish_processing(adapter.handled[count - 1])
         await asyncio.gather(*adapter._background_tasks)
 
     asyncio.run(run())
@@ -366,7 +418,10 @@ def exercise_call(make, monkeypatch):
             await exercise(seen)
 
         monkeypatch.setattr(WorkerRunner, "run", run)
-        await adapter._run_call(object(), call, "MZ-built")
+        try:
+            await adapter._run_call(object(), call, "MZ-built")
+        finally:
+            await adapter.cancel_background_tasks()
         return seen
 
     return build
@@ -390,7 +445,7 @@ def test_inbound_greeting_and_outbound_hermes_first(exercise_call, greeting):
 
     async def outbound(s):
         await _emit(s["transport"], "on_client_connected", None)
-        await asyncio.gather(*s["adapter"]._background_tasks)
+        await s["adapter"].wait_for_messages()
         assert not any(isinstance(f, TTSSpeakFrame) for f in s["frames"])
         event, = s["adapter"].handled
         assert event.text == "Approved callback purpose"
@@ -447,7 +502,7 @@ def test_smart_turn_relays_one_completed_turn_and_guardrails(exercise_call, monk
         await user._handle_transcription(TranscriptionFrame("second fragment", "caller", "now"))
         await user._maybe_emit_user_turn_stopped(stop)
         await asyncio.gather(*(task for _, task in user._event_tasks))
-        await asyncio.gather(*s["adapter"]._background_tasks)
+        await s["adapter"].wait_for_messages()
         assert [e.text for e in s["adapter"].handled] == ["first fragment second fragment"]
         await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content=""))
         assert any(isinstance(f, TTSSpeakFrame) and f.text == s["mod"].vb.NOT_UNDERSTOOD for f in s["frames"])
@@ -478,14 +533,14 @@ def test_idle_waits_for_hermes_completion_and_all_queued_playback(exercise_call,
         monkeypatch.setattr(playback, "push_frame", ignore)
         monkeypatch.setattr(sink, "push_frame", ignore)
         await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content="slow question"))
-        await asyncio.gather(*adapter._background_tasks)
+        await adapter.wait_for_messages()
         event, = adapter.handled
         await _emit(user, "on_user_turn_idle")
         assert not any(isinstance(f, TTSSpeakFrame) for f in s["frames"]), "admission is not inference completion"
         assert [f.timeout for f in s["frames"] if isinstance(f, UserIdleTimeoutUpdateFrame)][-1] == 0
         await adapter.on_processing_start(event)
-        await adapter.send(CALLER, "part one")
-        await adapter.send(CALLER, "part two")
+        await adapter.send(CALLER, "part one", reply_to=event.message_id, metadata={"notify": True})
+        await adapter.send(CALLER, "part two", reply_to=event.message_id, metadata={"notify": True})
         await adapter.on_processing_complete(event, types.SimpleNamespace(value="success"))
         await _emit(user, "on_user_turn_idle")
         assert call.guard.idles == 0, "completion must not rearm ahead of queued audio"
@@ -521,12 +576,12 @@ def test_relay_failures_clear_busy_and_use_spoken_guard(exercise_call, monkeypat
             if failure == "exception":
                 raise RuntimeError("sensitive provider detail")
             event._gateway_accepted = failure != "rejected"
+            if failure in ("failure", "cancelled"):
+                await adapter.on_processing_complete(event, types.SimpleNamespace(value=failure))
 
         monkeypatch.setattr(adapter, "handle_message", handle)
         await _emit(user, "on_user_turn_stopped", None, types.SimpleNamespace(content="question"))
         await asyncio.gather(*adapter._background_tasks)
-        if failure in ("failure", "cancelled"):
-            await adapter.on_processing_complete(adapter.handled[0], types.SimpleNamespace(value=failure))
         assert not call.pending_events
         if failure != "cancelled":
             assert [f.text for f in s["frames"] if isinstance(f, TTSSpeakFrame)] == [s["mod"].vb.ERROR_REPLY]
@@ -590,10 +645,10 @@ def test_interruption_drops_pending_speech_but_not_hermes_work(exercise_call, mo
 
         monkeypatch.setattr(sink, "push_frame", ignore)
         monkeypatch.setattr(sink, "_start_interruption", ignore)
-        await adapter.send(CALLER, "long answer")
+        await adapter.send(CALLER, "long answer", metadata={"thread_id": call.call_sid, "notify": True})
         call.bot_speaking = True
         adapter._relay_to_hermes(call, "interruption question")
-        await asyncio.gather(*adapter._background_tasks)
+        await adapter.wait_for_messages()
         await sink.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
         assert call.queued_speech == 0 and not call.bot_speaking
         assert call.pending_events
@@ -678,12 +733,14 @@ def test_completion_without_reply_rearms_idle_after_all_pending_turns(exercise_c
             await controller.process_frame(UserStoppedSpeakingFrame())
             for text in ("first question", "follow-up question"):
                 adapter._relay_to_hermes(call, text)
-            await asyncio.gather(*adapter._background_tasks)
-            first, second = adapter.handled
-            await adapter.on_processing_complete(first, types.SimpleNamespace(value="success"))
-            assert call.pending_events == {second.message_id}
+            await adapter.wait_for_messages()
+            first, = adapter.handled
+            await adapter.finish_processing(first)
+            assert call.pending_events == {f"{call.call_sid}-2"}
             assert not call.idle_enabled
-            await adapter.on_processing_complete(second, types.SimpleNamespace(value="cancelled"))
+            await adapter.wait_for_messages(2)
+            second = adapter.handled[1]
+            await adapter.finish_processing(second, "cancelled")
             for frame in s["frames"]:
                 await controller.process_frame(frame)
             assert controller._idle_timer_task is not None, "a no-audio result still needs an idle wait"

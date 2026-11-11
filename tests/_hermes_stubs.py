@@ -2,6 +2,7 @@
 imports the plugin (by file path, under an assigned package name)."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sqlite3
 import sys
@@ -36,6 +37,9 @@ class FakeBase:
     def __init__(self, config, platform):
         self.config, self.platform = config, platform
         self._background_tasks: set = set()
+        self._session_tasks: dict = {}
+        self._active_sessions: dict = {}
+        self._processing_done: dict = {}
         self.handled: list = []
         self.fatal: Optional[tuple] = None
 
@@ -44,6 +48,42 @@ class FakeBase:
 
     async def handle_message(self, event):
         self.handled.append(event)
+        event._gateway_accepted = True
+        key = self._event_session_key(event)
+        done = self._processing_done[event.message_id] = asyncio.Event()
+        self._active_sessions[key] = done
+
+        async def process():
+            try:
+                await done.wait()
+            finally:
+                self._active_sessions.pop(key, None)
+                self._session_tasks.pop(key, None)
+
+        self._session_tasks[key] = asyncio.create_task(process())
+
+    def _event_session_key(self, event):
+        return f"{event.source.chat_id}:{event.source.thread_id}"
+
+    async def wait_for_messages(self, count=1):
+        async with asyncio.timeout(2):
+            while len(self.handled) < count:
+                await asyncio.sleep(0)
+
+    async def finish_processing(self, event, outcome="success"):
+        task = self._session_tasks[self._event_session_key(event)]
+        await self.on_processing_complete(event, outcome)
+        self._processing_done[event.message_id].set()
+        await task
+
+    async def on_processing_complete(self, event, outcome):
+        pass
+
+    async def cancel_background_tasks(self):
+        tasks = set(self._background_tasks) | set(self._session_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def prepare_tts_text(self, text):
         return text.strip()
