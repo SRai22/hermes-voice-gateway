@@ -51,6 +51,7 @@ DEFAULT_MAX_CALL_SECONDS = 1800  # Pipecat idle detection does not cap call leng
 SAMPLE_RATE = 8000  # Twilio Media Streams are 8 kHz mu-law
 IDLE_SECONDS = 15
 _SERVER_START_TIMEOUT = 10.0
+_INGRESS_WAIT_SECONDS = 300.0  # bound a stalled gateway owner without cancelling its tools
 
 
 @dataclass
@@ -64,11 +65,19 @@ class _Call:
     profile: str = field(default_factory=vb.load_profile)
     guard: vb.CallGuard = field(default_factory=vb.CallGuard)
     pending_events: set[str] = field(default_factory=set)
+    event_outcomes: dict[str, str] = field(default_factory=dict)
+    relay_tasks: set[asyncio.Task] = field(default_factory=set)
     queued_speech: int = 0
     bot_speaking: bool = False
     idle_enabled: bool = True
     user_aggregator: Any = None
     ending: bool = False
+
+
+@dataclass
+class _IngressLane:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
 class VoiceAdapter(BasePlatformAdapter):
@@ -94,6 +103,8 @@ class VoiceAdapter(BasePlatformAdapter):
         self._voice_id = secret("ELEVENLABS_VOICE_ID")
         self._tokens = StreamTokens()
         self._calls: dict[str, _Call] = {}
+        self._ingress_lanes: dict[str, _IngressLane] = {}
+        self._ingress_stopping = False
         self._server = None
         self._server_task: Optional[asyncio.Task] = None
 
@@ -122,11 +133,13 @@ class VoiceAdapter(BasePlatformAdapter):
                 self._set_fatal_error("voice_server_failed", msg, retryable=True)
                 return False
             await asyncio.sleep(0.05)
+        self._ingress_stopping = False
         self._mark_connected()
         logger.info("[voice] listening on %s:%d (Twilio webhook: %s/voice)", self._host, self._port, self._webhook_url)
         return True
 
     async def disconnect(self) -> None:
+        self._ingress_stopping = True
         for call in list(self._calls.values()):
             await self._end_call(call)
         if self._server is not None:
@@ -136,6 +149,13 @@ class VoiceAdapter(BasePlatformAdapter):
         self._server = self._server_task = None
         self._mark_disconnected()
         logger.info("[voice] disconnected")
+
+    async def cancel_background_tasks(self) -> None:
+        # Hermes invokes this before disconnect(), so close voice admission here too.
+        self._ingress_stopping = True
+        for call in list(self._calls.values()):
+            await self._close_call_ingress(call)
+        await super().cancel_background_tasks()
 
     def _config_problem(self) -> str:
         missing = [name for name, val in (
@@ -163,6 +183,24 @@ class VoiceAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="no active call for this number")
         if call.ending or call.task.has_finished():  # caller hung up or goodbye is draining
             return SendResult(success=False, error="call already ended")
+        scope = (metadata or {}).get("thread_id")
+        if scope is not None and scope != call.call_sid:
+            return SendResult(success=False, error="reply belongs to a different call")
+        if reply_to is not None:
+            prefix = f"{call.call_sid}-"
+            turn = reply_to.removeprefix(prefix)
+            if not reply_to.startswith(prefix) or not turn.isdecimal() or not 0 < int(turn) <= call.turns:
+                return SendResult(success=False, error="reply does not match a turn in this call")
+        elif scope != call.call_sid:
+            return SendResult(success=False, error="reply has no call scope")
+        # Hermes marks final user-facing text with notify=True. Busy acks and
+        # operational notices are unmarked: consume them without synthesizing.
+        if (metadata or {}).get("notify") is not True:
+            return SendResult(success=True)
+        if (reply_to is not None and call.event_outcomes.get(reply_to) in ("failure", "cancelled")) or (
+            reply_to is None and any(outcome in ("failure", "cancelled") for outcome in call.event_outcomes.values())
+        ):
+            return SendResult(success=False, error="reply belongs to an abandoned delivery")
         text = self.prepare_tts_text(content)
         if not text:
             return SendResult(success=True)
@@ -211,10 +249,29 @@ class VoiceAdapter(BasePlatformAdapter):
 
     async def on_processing_complete(self, event, outcome) -> None:
         if call := self._event_call(event):
-            call.pending_events.discard(event.message_id)
-            if getattr(outcome, "value", outcome) == "failure":
-                await self._say(call, *call.guard.on_error())
-            await self._sync_idle(call)
+            await self._settle_event(call, event.message_id, getattr(outcome, "value", outcome))
+
+    async def _settle_event(self, call: _Call, event_id: str, outcome: str) -> None:
+        """Terminal delivery bookkeeping wins once, before any speech/idle awaits."""
+        if event_id not in call.pending_events:
+            return
+        call.pending_events.remove(event_id)
+        call.event_outcomes[event_id] = outcome
+        if call.ending or self._ingress_stopping:
+            return  # a dead transport must not hold teardown behind idle frames
+        if outcome == "failure":
+            await self._say(call, *call.guard.on_error())
+        await self._sync_idle(call)
+
+    async def _close_call_ingress(self, call: _Call) -> None:
+        call.ending = True
+        for event_id in list(call.pending_events):
+            await self._settle_event(call, event_id, "cancelled")
+        tasks = [task for task in call.relay_tasks if task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
@@ -349,11 +406,15 @@ class VoiceAdapter(BasePlatformAdapter):
         except Exception:
             logger.exception("[voice] call %s crashed", redact_phone(call.caller))
         finally:
-            self._calls.pop(call.caller, None)
-            logger.info("[voice] call from %s ended", redact_phone(call.caller))
+            try:
+                await self._close_call_ingress(call)
+            finally:
+                if self._calls.get(call.caller) is call:
+                    self._calls.pop(call.caller)
+                logger.info("[voice] call from %s ended", redact_phone(call.caller))
 
     async def _end_call(self, call: _Call) -> None:
-        call.ending = True
+        await self._close_call_ingress(call)
         if call.task is not None:
             from pipecat.frames.frames import CancelFrame
 
@@ -534,11 +595,14 @@ class VoiceAdapter(BasePlatformAdapter):
 
     def _relay_to_hermes(self, call: _Call, text: str) -> None:
         """Turn one final transcript into a Hermes message (non-blocking)."""
+        if call.ending or self._ingress_stopping:
+            return
         call.turns += 1
         logger.info("[voice] heard %d chars from %s", len(text), redact_phone(call.caller))
         source = self.build_source(
             chat_id=call.caller, chat_name=call.caller, chat_type="dm",
             user_id=call.caller, user_name=call.caller,
+            thread_id=call.call_sid,
         )
         event_id = f"{call.call_sid}-{call.turns}"
         event = MessageEvent(
@@ -552,26 +616,67 @@ class VoiceAdapter(BasePlatformAdapter):
         call.pending_events.add(event_id)
 
         async def admit():
-            await self._sync_idle(call)
+            lane = None
+            key = None
             try:
-                await self.handle_message(event)
+                key = self._voice_session_key(event)
+                lane = self._ingress_lanes.setdefault(key, _IngressLane())
+                lane.users += 1
+                async with asyncio.timeout(_INGRESS_WAIT_SECONDS), lane.lock:
+                    await self._sync_idle(call)
+                    await self._wait_voice_session(key)
+                    if call.ending or self._ingress_stopping:
+                        await self._settle_event(call, event_id, "cancelled")
+                        return
+                    await self.handle_message(event)
+                    # False is unambiguous ONLY here: no busy owner could absorb
+                    # the event. A completion racing admission is already settled.
+                    if event_id in call.pending_events and getattr(event, "_gateway_accepted", None) is not True:
+                        await self._settle_event(call, event_id, "failure")
+                    await self._wait_voice_session(key)
+                    # A task exiting without a lifecycle hook must not strand idle.
+                    await self._settle_event(call, event_id, "failure")
             except asyncio.CancelledError:
-                call.pending_events.discard(event.message_id)
-                await self._sync_idle(call)
+                await self._settle_event(call, event_id, "cancelled")
                 raise
             except Exception:
-                logger.warning("[voice] relay failed for %s", redact_phone(call.caller))
-                call.pending_events.discard(event.message_id)
-                await self._say(call, *call.guard.on_error())
-                await self._sync_idle(call)
-            else:
-                # handle_message returns after admission, not final delivery.
-                # Explicit rejection is the only successful return that clears busy.
-                if getattr(event, "_gateway_accepted", None) is False:
-                    call.pending_events.discard(event.message_id)
-                    await self._say(call, *call.guard.on_error())
-                    await self._sync_idle(call)
+                logger.warning("[voice] ingress failed or gateway task contract unsupported for %s", redact_phone(call.caller))
+                await self._settle_event(call, event_id, "failure")
+            finally:
+                if lane is not None:
+                    lane.users -= 1
+                    if not lane.users:
+                        self._ingress_lanes.pop(key, None)
 
         task = asyncio.create_task(admit())
+        call.relay_tasks.add(task)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(call.relay_tasks.discard)
+
+    def _voice_session_key(self, event) -> str:
+        """Guard the private Hermes task contract used to avoid steer/merge paths."""
+        resolver = getattr(self, "_event_session_key", None)
+        if (not callable(resolver) or not isinstance(getattr(self, "_session_tasks", None), dict)
+                or not isinstance(getattr(self, "_active_sessions", None), dict)):
+            raise TypeError("unsupported Hermes session-task contract")
+        key = resolver(event)
+        if not isinstance(key, str) or not key:
+            raise TypeError("unsupported Hermes session key")
+        return key
+
+    async def _wait_voice_session(self, key: str) -> None:
+        """Wait past completion hooks and awaited cleanup, including drain handoffs."""
+        while True:
+            owner = self._session_tasks.get(key)
+            if owner is None or (isinstance(owner, asyncio.Task) and owner.done()):
+                if key in self._active_sessions:
+                    raise RuntimeError("gateway guard has no live processing owner")
+                return
+            if not isinstance(owner, asyncio.Task) or owner is asyncio.current_task():
+                raise TypeError("unsupported Hermes processing owner")
+            # Unlike awaiting the task directly, wait never propagates cancellation
+            # to in-flight agent/tool work when a caller hangs up or times out.
+            await asyncio.wait({owner})
+            if not owner.cancelled():
+                owner.exception()  # retrieve unexpected task errors without leaking details
