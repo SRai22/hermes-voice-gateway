@@ -199,15 +199,30 @@ def test_real_identity_reader_rejects_env_only_or_incomplete_context(monkeypatch
     assert json.loads(module.save_enquiry({"name": "Buyer", "requirements": "Laptop", "consent": True}))["ok"] is False
 
 
+@pytest.mark.parametrize("memory", [
+    {"memory_enabled": False, "user_profile_enabled": False},
+    {}, None, "invalid", [],
+    {"memory_enabled": False},
+    {"user_profile_enabled": False},
+    {"memory_enabled": False, "user_profile_enabled": False, "provider": None},
+    {"memory_enabled": False, "user_profile_enabled": False, "provider": ""},
+    {"memory_enabled": False, "user_profile_enabled": False, "provider": False},
+    {"memory_enabled": True, "user_profile_enabled": False},
+    {"memory_enabled": False, "user_profile_enabled": True},
+    {"memory_enabled": "false", "user_profile_enabled": False},
+    {"memory_enabled": False, "user_profile_enabled": 0},
+    {"memory_enabled": False, "user_profile_enabled": False, "provider": "honcho"},
+    {"memory_enabled": False, "user_profile_enabled": False, "provider": "hindsight"},
+])
 @pytest.mark.parametrize("extra", [None, "terminal", "delegate_task", "tool_call"])
-def test_effective_tool_surface_must_equal_the_two_caller_tools(caller, monkeypatch, extra):
+def test_effective_tool_surface_must_equal_the_two_caller_tools(caller, monkeypatch, extra, memory):
     module, _identity, _conn = caller
     context = ModuleType("gateway.session_context")
     context.__dict__.update(bound_session_key=lambda: "", get_session_env=lambda name: "")
     skill_utils = ModuleType("agent.skill_utils")
     skill_utils.__dict__["parse_config_string_list"] = lambda value: value or []
     config = ModuleType("hermes_cli.config")
-    config.__dict__["load_config"] = lambda: {"platform_toolsets": {"voice": ["terminal"]}}
+    config.__dict__["load_config"] = lambda: {"platform_toolsets": {"voice": ["terminal"]}, "memory": memory}
     tool_config = ModuleType("hermes_cli.tools_config")
 
     def resolve(config, platform):
@@ -221,7 +236,9 @@ def test_effective_tool_surface_must_equal_the_two_caller_tools(caller, monkeypa
     model_tools.__dict__["get_tool_definitions"] = lambda **kwargs: [{"function": {"name": name}} for name in names]
     for fake in (context, skill_utils, config, tool_config, model_tools):
         monkeypatch.setitem(sys.modules, fake.__name__, fake)
-    if extra:
+    safe_memory = (isinstance(memory, dict) and memory.get("memory_enabled") is False
+                   and memory.get("user_profile_enabled") is False and memory.get("provider") in (None, ""))
+    if extra or not safe_memory:
         with pytest.raises(PermissionError):
             module.verify_tool_surface()
     else:

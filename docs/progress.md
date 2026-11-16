@@ -43,6 +43,11 @@
 - Local Twilio-format WebSocket test used real ElevenLabs STT/TTS and a simulated Hermes processing/reply lifecycle. One completed transcript was relayed, audio returned, thinking longer than the idle timeout did not count as caller silence, two idle events ended the call, and the call registry emptied. This is not a real Twilio/Hermes end-to-end test.
 - The installed plugin's independent local modifications were preserved; only its version declarations/install hints were aligned. New behaviour has not been deployed there, and the running gateway was not restarted.
 
+## Listing review fixes
+- Completed: caller inference is refused unless built-in memory and user profile are explicitly disabled and no memory provider is configured.
+- README requires a dedicated caller profile and explains its visible context and retained session/enquiry records. Profile paths use the Hermes resolver; standalone local development retains an import-only fallback when Hermes is absent. The runner no longer parses dotenv files; manifest metadata is corrected.
+- Verified on Pipecat 1.7.0: 263 tests passed (38 upstream deprecation warnings), including registration smoke coverage. Plugin validate and doctor passed (five tools, one hook); `git diff --check` passed. Ruff reports the same 60 existing findings as the reviewed commit; no new diagnostics (ignoring the temporary baseline directory name). No live Twilio test or installed-plugin deployment was performed.
+
 ## In progress
 - Waiting on a real call test (needs Hermes + Twilio + a public URL); see docs/checks.md
 

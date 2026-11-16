@@ -35,6 +35,17 @@ def test_profile_default_location_uses_hermes_home(monkeypatch, tmp_path) -> Non
     assert vb.profile_path() == tmp_path / "voice" / "PROFILE.md"
 
 
+def test_profile_uses_hermes_resolver_not_process_home(monkeypatch, tmp_path):
+    from types import ModuleType
+
+    constants = ModuleType("hermes_constants")
+    constants.__dict__["get_hermes_home"] = lambda: tmp_path / "voice-profile"
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    monkeypatch.delenv("VOICE_PROFILE_PATH", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "owner"))
+    assert vb.profile_path() == tmp_path / "voice-profile/voice/PROFILE.md"
+
+
 def test_guard_errors_apologise_then_hang_up() -> None:
     guard = vb.CallGuard(max_errors=3)
     assert guard.on_error() == (vb.ERROR_REPLY, False)

@@ -4,13 +4,12 @@ Plain Python, no Pipecat import, so the plugin still loads without it.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 try:  # plugin package under Hermes
-    from ._env import secret
+    from ._env import hermes_home, secret
 except ImportError:  # imported top-level by the dev scripts and tests
-    from _env import secret
+    from _env import hermes_home, secret
 
 DEFAULT_GREETING = "Hi, how can I help you today?"
 
@@ -38,12 +37,11 @@ def greeting() -> str:
 
 
 def profile_path() -> Path:
-    """VOICE_PROFILE_PATH, else <HERMES_HOME or ~/.hermes>/voice/PROFILE.md."""
+    """VOICE_PROFILE_PATH, else the active Hermes home’s voice/PROFILE.md."""
     explicit = secret("VOICE_PROFILE_PATH").strip()
     if explicit:
         return Path(explicit).expanduser()
-    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-    return Path(home) / "voice" / "PROFILE.md"
+    return hermes_home() / "voice" / "PROFILE.md"
 
 
 def load_profile() -> str:

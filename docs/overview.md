@@ -27,6 +27,8 @@ Model names come from environment variables (defaults in parentheses):
 - ``ELEVENLABS_TTS_MODEL`` (eleven_flash_v2_5) — ElevenLabs text-to-speech
 - ``OPENAI_MODEL`` (gpt-5.6-luna) — OpenAI LLM
 
-Set these plus ``ELEVENLABS_API_KEY`` and ``OPENAI_API_KEY`` in ``~/.hermes/.env`` before starting the pipeline.
+Supply ``ELEVENLABS_API_KEY`` and ``OPENAI_API_KEY`` in the process environment for the standalone pipeline, or use Hermes with profile-scoped secrets. The runner never reads an `.env` file.
+
+Phone calls must run in a dedicated Hermes profile, with built-in memory and user profile disabled and no external memory provider. Caller-facing instructions and files must contain only information safe to disclose to callers.
 
 Each piece will be tested before moving to the next, so nothing is left broken or half-finished.

@@ -193,7 +193,7 @@ def require_access() -> CallerIdentity:
 
 
 def verify_tool_surface() -> None:
-    """Fail closed when Hermes' effective selection adds any other capability."""
+    """Require memory isolation and exactly the two caller tools before inference."""
     from agent.skill_utils import parse_config_string_list
     from gateway.session_context import bound_session_key, get_session_env
     from hermes_cli.config import load_config
@@ -203,6 +203,15 @@ def verify_tool_surface() -> None:
     if not callable(bound_session_key) or not callable(get_session_env):
         raise PermissionError("unsupported gateway caller context")
     config = load_config()
+    memory = config.get("memory")
+    if (not isinstance(memory, dict)
+            or memory.get("memory_enabled") is not False
+            or memory.get("user_profile_enabled") is not False
+            or memory.get("provider") not in (None, "")):
+        raise PermissionError(
+            "caller profile must disable memory.memory_enabled and memory.user_profile_enabled "
+            "and leave memory.provider unset; use a dedicated voice profile"
+        )
     selected = {**config, "platform_toolsets": {**(config.get("platform_toolsets") or {}), "voice": TOOLSET_SELECTION}}
     enabled = sorted(_get_platform_tools(selected, "voice"))
     disabled = parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets")) or None

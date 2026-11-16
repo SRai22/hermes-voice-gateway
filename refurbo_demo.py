@@ -7,12 +7,16 @@ only the pure search helper; this module never notifies sales or dials a phone.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+
+try:
+    from ._env import hermes_home, secret
+except ImportError:  # standalone local dev harness
+    from _env import hermes_home, secret
 
 INVENTORY_PATH = Path(__file__).resolve().parent / "voice" / "refurbo-inventory.json"
 INVENTORY_NOTICE = (
@@ -85,9 +89,8 @@ def book_appointment(*, name: str, phone: str, consent: bool, appointment_at: st
                    budget_inr=budget_inr, model=model, ram_gb=ram_gb, ssd_gb=ssd_gb,
                    use_case=use_case, idempotency_key=idempotency_key)
     encoded = json.dumps(payload, sort_keys=True)
-    path = Path(db_path or os.environ.get("VOICE_REFURBO_DEMO_DB") or (
-        Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
-        / "plugin-data/hermes-voice-gateway/refurbo-demo.db"))
+    path = Path(db_path or secret("VOICE_REFURBO_DEMO_DB") or (
+        hermes_home() / "plugin-data/hermes-voice-gateway/refurbo-demo.db"))
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as db:
         db.execute("CREATE TABLE IF NOT EXISTS appointments "

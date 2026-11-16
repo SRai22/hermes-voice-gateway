@@ -73,6 +73,21 @@ def test_invalid_booking_never_creates_database(tmp_path, field, value):
     assert not path.exists()
 
 
+def test_demo_database_uses_hermes_resolver(monkeypatch, tmp_path):
+    from types import ModuleType
+
+    import refurbo_demo as demo
+
+    constants = ModuleType("hermes_constants")
+    constants.__dict__["get_hermes_home"] = lambda: tmp_path / "voice-profile"
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "owner"))
+    monkeypatch.delenv("VOICE_REFURBO_DEMO_DB", raising=False)
+    assert demo.book_appointment(**booking_args())["ok"]
+    assert (tmp_path / "voice-profile/plugin-data/hermes-voice-gateway/refurbo-demo.db").exists()
+    assert not (tmp_path / "owner").exists()
+
+
 def test_distribution_contains_demo_module_and_inventory():
     import tomllib
 

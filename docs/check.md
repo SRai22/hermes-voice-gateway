@@ -17,6 +17,14 @@ After writing code for a new piece, run these checks again before moving on:
 - [ ] Smoke test asserts the new tool or hook name is present
 - [ ] Read the real output from each command — do not guess whether it passed
 
+## Listing review checks
+
+- [x] Reject caller turns with enabled, missing or malformed memory flags or an external provider.
+- [x] Resolve voice instructions and demo storage using Hermes’ active home, including context overrides.
+- [x] Standalone runner never reads `.env`; keys come from the process or Hermes scoped secrets.
+- [x] README requires a dedicated caller profile and explains caller-visible context.
+- [x] Manifest points to the repository and describes implemented callbacks.
+
 ## Tests
 
 - [x] Confirm Pipecat is exactly 1.7.0 in the test runner, local runner, and Hermes plugin runtime; dependency declarations must match.

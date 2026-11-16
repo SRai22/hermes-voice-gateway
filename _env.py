@@ -6,6 +6,16 @@ local dev harness).
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+def hermes_home() -> Path:
+    """Honor Hermes context/profile binding; support the standalone dev harness."""
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME") or "~/.hermes").expanduser()
+    return get_hermes_home()
 
 
 def secret(name: str, default: str = "") -> str:

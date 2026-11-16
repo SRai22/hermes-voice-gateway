@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Known-good runner: start the hermes-voice-gateway local Pipecat pipeline + signaling server in ONE process.
 
-Loads secrets from ~/.hermes/.env, invokes the plugin's real
-voice_start_local_pipeline handler, then runs frontend/signaling-server.py's
+Requires keys in the process environment (or Hermes profile-scoped secrets).
+Starts the real pipeline, then runs frontend/signaling-server.py's
 HTTP server (port 8765) in a daemon thread so a browser can POST SDP offers
 and connect end to end.
 
@@ -26,20 +26,6 @@ logging.basicConfig(
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
-
-# Load secrets from ~/.hermes/.env
-ENV_FILE = os.path.expanduser("~/.hermes/.env")
-if os.path.exists(ENV_FILE):
-    with open(ENV_FILE) as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
 
 from pipeline import start_local_pipeline  # noqa: E402
 

@@ -2,10 +2,10 @@ name: hermes-voice-gateway
 version: "0.2.0"
 manifest_version: 2
 api_version: 1
-description: "Voice platform for Hermes: answers Twilio phone calls, speaks Hermes' replies with ElevenLabs, and (planned) places operator-approved callbacks. Includes a local WebRTC dev pipeline."
+description: "Voice platform for Hermes: answers Twilio phone calls, speaks Hermes' replies with ElevenLabs, and places operator-approved callbacks. Includes a local WebRTC dev pipeline."
 kind: platform
 license: MIT
-homepage: https://github.com/shravanrai/hermes-voice-gateway
+homepage: https://github.com/SRai22/hermes-voice-gateway
 tags: [voice, gateway, twilio, pipecat, phone, calls, elevenlabs]
 requires_env:
   - name: TWILIO_ACCOUNT_SID

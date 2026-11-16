@@ -8,7 +8,7 @@ Early-stage (v0.2). Inbound calls, operator-approved callbacks and call-status l
 Twilio -> `POST <VOICE_WEBHOOK_URL>/voice` (signature checked) -> TwiML opens a media stream to `/media` -> ElevenLabs speech-to-text -> the transcript goes to Hermes as a normal message from the caller's number -> Hermes' reply is spoken with ElevenLabs.
 
 ## Setup
-1. Install the plugin in Hermes and add these to Hermes' `.env`:
+1. Create a dedicated caller profile with `hermes profile create voice` (do not clone your personal profile). Install and run this plugin in that profile, not your personal/default profile. Set `memory.memory_enabled: false`, `memory.user_profile_enabled: false`, and leave `memory.provider` unset or empty; see the runtime policy below. Add credentials through Hermes’ secret configuration for that profile:
    - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `ELEVENLABS_API_KEY`
    - `VOICE_WEBHOOK_URL`: the public https base URL Twilio can reach, no trailing slash (a tunnel such as ngrok works for local testing)
    - `VOICE_ALLOWED_USERS`: comma-separated caller numbers (E.164). With no list, every call is refused, unless `VOICE_ALLOW_ALL_USERS=true`.
@@ -39,7 +39,20 @@ Phone turns can use only `voice_search_inventory` and `voice_save_enquiry`. The 
 
 **Runtime policy prerequisite:** Hermes can automatically append other installed plugin toolsets, context-engine tools or tool-search wrappers even after a platform override. Before each caller turn, the plugin checks the resolved tool definitions and refuses inference unless they are exactly the two caller tools. The pre-tool hook also explicitly denies all other tool names and denies permission-check errors; handler checks remain mandatory even for direct dispatch.
 
-In the active Hermes profile, save a Voice tool selection containing only `voice_caller`, with MCP disabled. `known_plugin_toolsets.voice` must include the omitted installed plugin toolsets (including `voice`) so Hermes does not add them by default. For a profile with only this plugin, that list is `[voice, voice_caller]`. Additional plugin toolsets must also be marked known-and-omitted for Voice. Context-engine additions and tool-search deferral must not broaden/replace the two exposed tool names. Use Hermes' tools/configuration interfaces; this plugin does not rewrite profile settings. Misconfiguration produces a caller-policy error in gateway logs and fails closed. This policy/context integration is checked against the installed Hermes APIs and must be reverified on runtime upgrades.
+Create and configure a dedicated profile before accepting calls:
+
+```sh
+hermes profile create voice
+hermes --profile voice config set memory.memory_enabled false
+hermes --profile voice config set memory.user_profile_enabled false
+hermes --profile voice config set memory.provider ''
+```
+
+Run the gateway with `hermes --profile voice gateway run` after installing the plugin and configuring its credentials in that profile. Do not clone or reuse an owner profile. Before every caller turn, the plugin refuses inference unless both built-in memory flags are explicitly boolean `false` and `memory.provider` is unset or empty. An external provider is refused even if both built-in flags are off, preventing caller turns from being synced to that provider.
+
+**What callers can see:** this is still a normal Hermes agent in the dedicated profile, not a separate prompt sandbox. It can see Hermes’ system/safety instructions, that profile’s persona (`SOUL.md` and configured system prompts), any project/context instructions Hermes loads, the voice instructions (`voice/PROFILE.md` or `VOICE_PROFILE_PATH`), the current call’s history, approved callback purpose when applicable, and results from the two caller tools. Keep all of that context caller-safe; never copy personal persona, secrets or private business notes into it. The disabled memory stores (`MEMORY.md`/`USER.md`) are not loaded as built-in memory and caller turns are not synced to an external memory provider. Hermes session/transcript storage and consented local enquiry storage still apply; disabling memory is not a no-retention mode.
+
+In the dedicated voice profile, save a Voice tool selection containing only `voice_caller`, with MCP disabled. `known_plugin_toolsets.voice` must include the omitted installed plugin toolsets (including `voice`) so Hermes does not add them by default. For a profile with only this plugin, that list is `[voice, voice_caller]`. Additional plugin toolsets must also be marked known-and-omitted for Voice. Context-engine additions and tool-search deferral must not broaden/replace the two exposed tool names. Use Hermes' tools/configuration interfaces; this plugin does not rewrite profile settings. Misconfiguration produces a caller-policy error in gateway logs and fails closed. This policy/context integration is checked against the installed Hermes APIs and must be reverified on runtime upgrades.
 
 ## Speech recognition
 Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local development pipeline. Silero VAD detects the end of each spoken segment, then the audio is uploaded for transcription. Pause after speaking to let Hermes respond; this is segmented HTTP transcription, not the realtime WebSocket API. Each call owns an HTTP session that closes when the call ends or setup fails.
@@ -68,7 +81,7 @@ Phone calls use `scribe_v2` through `ElevenLabsSTTService`, matching the local d
 ## Local dev (no phone)
 Use **Pipecat 1.7.0 exactly**, not a floating 1.7.x or 1.15.x release. Both dependency declarations and install hints use the same pin. Verify the actual interpreter as well as the dependency files; the Hermes-managed runtime and a shell's Python can be different environments.
 
-`voice_start_local_pipeline` and `frontend/` give a browser-mic test loop that does not involve Twilio or Hermes' agent. Run `python scripts/start_local_pipeline.py`, then open http://127.0.0.1:8765/. Dev only; it is not part of the shipped plugin.
+`voice_start_local_pipeline` and `frontend/` give a browser-mic test loop that does not involve Twilio or Hermes' agent. Supply `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` in the process environment, then run `python scripts/start_local_pipeline.py` and open http://127.0.0.1:8765/. The standalone runner never reads `~/.hermes/.env` or any profile dotenv file; when invoked through Hermes, secrets resolve through `get_scoped_secret` instead. Dev only; it is not part of the shipped plugin.
 
 ## Tests
 `pytest tests` from the repo root.

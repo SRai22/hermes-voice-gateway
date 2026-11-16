@@ -39,11 +39,11 @@ export VOICE_GREETING="Hi, I'm Hermes, an AI assistant for this Refurbo demo. Wh
 export LOGURU_LEVEL=INFO
 ```
 
-Use the project's verified Python environment with Pipecat exactly 1.7.0 to run `scripts/start_local_pipeline.py`, then open http://127.0.0.1:8765/. API keys belong in the user's local Hermes environment file, never in this document or a recording. Restart the single-call runner between calls.
+Use the project's verified Python environment with Pipecat exactly 1.7.0 to run `scripts/start_local_pipeline.py`, then open http://127.0.0.1:8765/. Supply API keys in the standalone process environment, or use Hermes’ profile-scoped secrets when invoking through Hermes. The runner never reads dotenv files. Never put keys in this document or a recording. Restart the single-call runner between calls.
 
 The opt-in local demo is intended to expose `refurbo_search_inventory` and `refurbo_book_appointment`. Without those tools the profile must say it cannot save an appointment. This feature does not automatically deploy tools to the real Hermes/Twilio caller path.
 
-Appointments are saved as plaintext SQLite records at `<HERMES_HOME>/plugin-data/hermes-voice-gateway/refurbo-demo.db` (normally `~/.hermes/plugin-data/hermes-voice-gateway/refurbo-demo.db`). `VOICE_REFURBO_DEMO_DB` overrides this path. The `appointments` table stores an ID, an idempotency key, and a JSON payload containing the confirmed requirements and appointment time. Booking requires positive numeric budget, RAM, and SSD targets; if the buyer is unsure, agree targets before booking rather than inventing values. No real sales calendar availability is checked, and rescheduling is not implemented.
+Appointments are saved as plaintext SQLite records at `<HERMES_HOME>/plugin-data/hermes-voice-gateway/refurbo-demo.db` (the active profile home is resolved through `hermes_constants.get_hermes_home()` when running with Hermes). `VOICE_REFURBO_DEMO_DB` overrides this path. The `appointments` table stores an ID, an idempotency key, and a JSON payload containing the confirmed requirements and appointment time. Booking requires positive numeric budget, RAM, and SSD targets; if the buyer is unsure, agree targets before booking rather than inventing values. No real sales calendar availability is checked, and rescheduling is not implemented.
 
 ## Recording story
 
